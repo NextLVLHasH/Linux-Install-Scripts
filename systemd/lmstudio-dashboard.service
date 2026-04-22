@@ -1,0 +1,26 @@
+[Unit]
+Description=LM Studio + Custom Trainer Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace these via 10-install-systemd.sh — placeholders are filled in there.
+User=__USER__
+Group=__USER__
+WorkingDirectory=__INSTALL_DIR__
+Environment=AUTO_LAUNCH_LMSTUDIO=1
+Environment=DASHBOARD_HOST=0.0.0.0
+Environment=DASHBOARD_PORT=8765
+Environment=VENV_DIR=__VENV_DIR__
+Environment=LMSTUDIO_DIR=__LMSTUDIO_DIR__
+# DISPLAY/XAUTHORITY are needed for the auto-launch of the LM Studio GUI on
+# desktops. On headless boxes they will be missing and auto-launch is skipped.
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=__HOME__/.Xauthority
+ExecStart=__INSTALL_DIR__/09-start-dashboard.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

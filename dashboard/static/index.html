@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>LM Studio Trainer Dashboard</title>
+
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,700&display=swap" />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" />
+  <link rel="stylesheet" href="/static/styles.css" />
+
+  <script type="importmap">
+    {
+      "imports": {
+        "@material/web/": "https://esm.run/@material/web/"
+      }
+    }
+  </script>
+  <script type="module">
+    import '@material/web/all.js';
+    import { styles as typescaleStyles } from '@material/web/typography/md-typescale-styles.js';
+    document.adoptedStyleSheets.push(typescaleStyles.styleSheet);
+  </script>
+  <script type="module" src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="material-symbols-outlined brand-icon">network_intelligence</span>
+    <h1 class="md-typescale-title-large">LM Studio Trainer</h1>
+    <div class="spacer"></div>
+    <md-filled-tonal-button id="btn-launch-lmstudio">
+      <span class="material-symbols-outlined" slot="icon">rocket_launch</span>
+      Launch LM Studio
+    </md-filled-tonal-button>
+  </header>
+
+  <main class="grid">
+
+    <section class="card">
+      <header class="card-header">
+        <span class="material-symbols-outlined">cloud_download</span>
+        <h2 class="md-typescale-title-medium">1. Download a base model</h2>
+      </header>
+      <p class="md-typescale-body-small hint">
+        Pulls the Hugging Face source weights (LM Studio's GGUF files are inference-only).
+      </p>
+      <md-outlined-text-field id="dl-repo" label="HF repo id" value="Qwen/Qwen2.5-0.5B"></md-outlined-text-field>
+      <md-outlined-text-field id="dl-token" label="HF token (optional)" type="password"></md-outlined-text-field>
+      <div class="row">
+        <md-filled-button id="btn-download">
+          <span class="material-symbols-outlined" slot="icon">download</span>
+          Download
+        </md-filled-button>
+      </div>
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Local models</h3>
+      <md-list id="models-list"></md-list>
+    </section>
+
+    <section class="card">
+      <header class="card-header">
+        <span class="material-symbols-outlined">database</span>
+        <h2 class="md-typescale-title-medium">2. Custom training data</h2>
+      </header>
+      <p class="md-typescale-body-small hint">
+        JSONL only. Recognized shapes: <code>{prompt,completion}</code>, Alpaca <code>{instruction,input,output}</code>,
+        chat <code>{messages}</code>, raw <code>{text}</code>.
+      </p>
+      <input type="file" id="ds-file" accept=".jsonl" hidden />
+      <div class="row">
+        <md-outlined-button id="btn-pick-file">
+          <span class="material-symbols-outlined" slot="icon">attach_file</span>
+          Choose .jsonl
+        </md-outlined-button>
+        <span id="ds-filename" class="md-typescale-body-small"></span>
+        <md-filled-button id="btn-upload" disabled>
+          <span class="material-symbols-outlined" slot="icon">upload</span>
+          Upload
+        </md-filled-button>
+      </div>
+
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Pull from Hugging Face</h3>
+      <md-outlined-text-field id="ds-hf-repo" label="Dataset repo id"
+                              value="Canstralian/pentesting_dataset"></md-outlined-text-field>
+      <div class="row">
+        <md-outlined-text-field id="ds-hf-split" label="Split" value="train" style="max-width:160px"></md-outlined-text-field>
+        <md-outlined-text-field id="ds-hf-textfield" label="Text field (optional)" style="flex:1"></md-outlined-text-field>
+        <md-filled-tonal-button id="btn-hf-fetch">
+          <span class="material-symbols-outlined" slot="icon">cloud_download</span>
+          Fetch
+        </md-filled-tonal-button>
+      </div>
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Datasets</h3>
+      <md-list id="datasets-list"></md-list>
+    </section>
+
+    <section class="card span-2">
+      <header class="card-header">
+        <span class="material-symbols-outlined">memory</span>
+        <h2 class="md-typescale-title-medium">Hardware</h2>
+        <div class="spacer"></div>
+        <span id="gpu-summary" class="status-chip">detecting…</span>
+      </header>
+      <div id="gpu-hetero-warn" class="approval-bar" hidden>
+        <span class="material-symbols-outlined warn">info</span>
+        <div>
+          <div class="md-typescale-label-large">Heterogeneous GPU rig detected</div>
+          <div id="gpu-hetero-detail" class="md-typescale-body-small"></div>
+        </div>
+        <div class="spacer"></div>
+        <md-text-button id="btn-exclude-smallest">Exclude smallest</md-text-button>
+      </div>
+      <div id="gpu-checkboxes" class="gpu-checks"></div>
+      <p id="gpu-profile-note" class="hint"></p>
+    </section>
+
+    <section class="card span-2">
+      <header class="card-header">
+        <span class="material-symbols-outlined">model_training</span>
+        <h2 class="md-typescale-title-medium">3. Fine-tune (LoRA)</h2>
+      </header>
+
+      <div class="grid-2">
+        <md-outlined-select id="train-model" label="Base model"></md-outlined-select>
+        <md-outlined-select id="train-dataset" label="Dataset"></md-outlined-select>
+        <md-outlined-text-field id="train-output" label="Run name" value="my-finetune"></md-outlined-text-field>
+        <md-outlined-text-field id="train-epochs" label="Epochs" type="number" value="3"></md-outlined-text-field>
+      </div>
+
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Scaling</h3>
+      <div class="grid-2">
+        <md-outlined-text-field id="train-num-gpus" label="GPUs to use" type="number" min="1" max="9"></md-outlined-text-field>
+        <md-outlined-select id="train-strategy" label="Strategy">
+          <md-select-option value="auto" selected><div slot="headline">auto</div></md-select-option>
+          <md-select-option value="single"><div slot="headline">single (one process)</div></md-select-option>
+          <md-select-option value="ddp"><div slot="headline">DDP (data parallel)</div></md-select-option>
+          <md-select-option value="fsdp"><div slot="headline">FSDP (full shard)</div></md-select-option>
+          <md-select-option value="zero3"><div slot="headline">DeepSpeed ZeRO-3</div></md-select-option>
+        </md-outlined-select>
+        <md-outlined-select id="train-precision" label="Mixed precision">
+          <md-select-option value="bf16" selected><div slot="headline">bf16</div></md-select-option>
+          <md-select-option value="fp16"><div slot="headline">fp16</div></md-select-option>
+          <md-select-option value="no"><div slot="headline">fp32 (no mixed precision)</div></md-select-option>
+        </md-outlined-select>
+        <label class="switch-row">
+          <md-switch id="train-autotune" selected></md-switch>
+          <span class="md-typescale-body-medium">Auto-tune for detected hardware</span>
+        </label>
+      </div>
+
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Speed</h3>
+      <div class="grid-2">
+        <md-outlined-select id="train-attn" label="Attention backend">
+          <md-select-option value="" selected><div slot="headline">auto (FlashAttn2 if installed, else SDPA)</div></md-select-option>
+          <md-select-option value="flash_attention_2"><div slot="headline">flash_attention_2</div></md-select-option>
+          <md-select-option value="sdpa"><div slot="headline">sdpa (fused PyTorch)</div></md-select-option>
+          <md-select-option value="eager"><div slot="headline">eager (slowest, debugging)</div></md-select-option>
+        </md-outlined-select>
+        <md-outlined-text-field id="train-workers" label="DataLoader workers" type="number" value="4"></md-outlined-text-field>
+        <label class="switch-row">
+          <md-switch id="train-packing" selected></md-switch>
+          <span class="md-typescale-body-medium">Sequence packing (2-5× more useful tokens/batch)</span>
+        </label>
+        <label class="switch-row">
+          <md-switch id="train-groupbylen" selected></md-switch>
+          <span class="md-typescale-body-medium">Group by length (less padding waste)</span>
+        </label>
+        <label class="switch-row">
+          <md-switch id="train-compile"></md-switch>
+          <span class="md-typescale-body-medium">torch.compile (faster steady-state, slow first step)</span>
+        </label>
+      </div>
+
+      <md-divider></md-divider>
+      <h3 class="md-typescale-title-small">Manual overrides
+        <span class="md-typescale-body-small hint">(blank = auto-tune picks)</span>
+      </h3>
+      <div class="grid-2">
+        <md-outlined-text-field id="train-batch" label="Batch size (per GPU)" type="number"></md-outlined-text-field>
+        <md-outlined-text-field id="train-grad" label="Grad accum" type="number"></md-outlined-text-field>
+        <md-outlined-text-field id="train-lr" label="Learning rate" value="2e-4"></md-outlined-text-field>
+        <md-outlined-text-field id="train-maxlen" label="Max seq length" type="number"></md-outlined-text-field>
+        <md-outlined-text-field id="train-r" label="LoRA r" type="number"></md-outlined-text-field>
+        <md-outlined-text-field id="train-alpha" label="LoRA alpha" type="number"></md-outlined-text-field>
+        <md-outlined-text-field id="train-targets" label="Target modules"
+                                value="q_proj,k_proj,v_proj,o_proj"></md-outlined-text-field>
+        <label class="switch-row">
+          <md-switch id="train-no4bit"></md-switch>
+          <span class="md-typescale-body-medium">Disable 4-bit (forces bf16 weights)</span>
+        </label>
+        <label class="switch-row">
+          <md-switch id="train-gc"></md-switch>
+          <span class="md-typescale-body-medium">Gradient checkpointing (save VRAM)</span>
+        </label>
+      </div>
+
+      <div class="row end">
+        <md-text-button id="btn-cancel" disabled>
+          <span class="material-symbols-outlined" slot="icon">stop_circle</span>
+          Cancel
+        </md-text-button>
+        <md-filled-button id="btn-train">
+          <span class="material-symbols-outlined" slot="icon">play_arrow</span>
+          Start training
+        </md-filled-button>
+      </div>
+    </section>
+
+    <section class="card span-2">
+      <header class="card-header">
+        <span class="material-symbols-outlined">terminal</span>
+        <h2 class="md-typescale-title-medium">Job log</h2>
+        <div class="spacer"></div>
+        <span id="job-status" class="status-chip">idle</span>
+      </header>
+      <md-linear-progress id="job-progress" indeterminate style="display:none"></md-linear-progress>
+      <pre id="log-pane" class="log-pane">No job running.</pre>
+    </section>
+
+    <section class="card span-2">
+      <header class="card-header">
+        <span class="material-symbols-outlined">deployed_code</span>
+        <h2 class="md-typescale-title-medium">Completed runs</h2>
+      </header>
+      <md-list id="runs-list"></md-list>
+    </section>
+
+    <section class="card span-2">
+      <header class="card-header">
+        <span class="material-symbols-outlined">smart_toy</span>
+        <h2 class="md-typescale-title-medium">4. Agent: run commands with the trained model</h2>
+        <div class="spacer"></div>
+        <span id="agent-status" class="status-chip">idle</span>
+      </header>
+
+      <p class="hint">
+        Loads a base model + LoRA adapter, asks the model to solve the goal,
+        parses <code>&lt;tool_call&gt;</code> blocks, and runs the shell commands it
+        emits. Hard-blocks destructive patterns; everything else needs your
+        approval (or matches an allowlist regex).
+        <strong>Run only on trusted hosts</strong> — the container, a sandbox VM,
+        or a throwaway user account.
+      </p>
+
+      <div class="grid-2">
+        <md-outlined-select id="agent-model" label="Base model"></md-outlined-select>
+        <md-outlined-select id="agent-adapter" label="LoRA adapter (optional)">
+          <md-select-option value=""><div slot="headline">— none (use base only) —</div></md-select-option>
+        </md-outlined-select>
+        <md-outlined-select id="agent-mode" label="Approval mode">
+          <md-select-option value="dry-run"><div slot="headline">dry-run (never executes)</div></md-select-option>
+          <md-select-option value="approve" selected><div slot="headline">approve each command</div></md-select-option>
+          <md-select-option value="allow"><div slot="headline">auto-run if allowlisted</div></md-select-option>
+        </md-outlined-select>
+        <md-outlined-text-field id="agent-iters" label="Max iterations" type="number" value="6"></md-outlined-text-field>
+        <md-outlined-text-field id="agent-timeout" label="Per-command timeout (s)" type="number" value="30"></md-outlined-text-field>
+      </div>
+
+      <md-outlined-text-field id="agent-goal" label="Goal" type="textarea" rows="2"
+                              value="List the listening TCP services on this host."></md-outlined-text-field>
+
+      <div class="row end">
+        <md-text-button id="btn-agent-cancel" disabled>
+          <span class="material-symbols-outlined" slot="icon">stop_circle</span>
+          End session
+        </md-text-button>
+        <md-filled-button id="btn-agent-run">
+          <span class="material-symbols-outlined" slot="icon">play_arrow</span>
+          Run agent
+        </md-filled-button>
+      </div>
+
+      <div id="agent-pending" class="approval-bar" hidden>
+        <span class="material-symbols-outlined warn">warning</span>
+        <div>
+          <div class="md-typescale-label-large">Approve command?</div>
+          <pre id="agent-pending-cmd" class="cmd-line"></pre>
+        </div>
+        <div class="spacer"></div>
+        <md-text-button id="btn-agent-deny">Deny</md-text-button>
+        <md-filled-button id="btn-agent-approve">
+          <span class="material-symbols-outlined" slot="icon">check</span>
+          Approve & run
+        </md-filled-button>
+      </div>
+
+      <pre id="agent-pane" class="log-pane">No agent session yet.</pre>
+    </section>
+
+  </main>
+
+  <md-snackbar id="snackbar"></md-snackbar>
+</body>
+</html>

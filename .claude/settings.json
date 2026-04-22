@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(python gpu_profile.py args 0)",
+      "Bash(python gpu_profile.py args 8)",
+      "Bash(python gpu_profile.py args 24)",
+      "Bash(python gpu_profile.py args 80)",
+      "Bash(python gpu_profile.py args 96)"
+    ]
+  }
+}

@@ -1,0 +1,61 @@
+# Compose file for ZimaOS / CasaOS / generic Docker hosts.
+# Import via the CasaOS dashboard ("Custom Install") or run:
+#   docker compose up -d
+# CasaOS one-liner install (per the user's note):
+#   curl -fsSL https://get.casaos.io | sudo bash
+#
+# Persistent data lives in named volumes so model downloads + datasets survive
+# container restarts. GPU support requires the NVIDIA Container Toolkit on the
+# host. Comment out the `deploy` block if you only have a CPU.
+
+services:
+  trainer-dashboard:
+    image: lmstudio-trainer-dashboard:latest
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: trainer-dashboard
+    restart: unless-stopped
+    ports:
+      - "8765:8765"
+    environment:
+      AUTO_LAUNCH_LMSTUDIO: "0"   # headless container — no LM Studio GUI
+      DASHBOARD_HOST: "0.0.0.0"
+      DASHBOARD_PORT: "8765"
+      HF_HOME: "/app/hf-cache"
+    volumes:
+      - models:/app/models
+      - data:/app/data
+      - runs:/app/runs
+      - hf-cache:/app/hf-cache
+    # Multi-GPU note: `count: all` exposes every visible NVIDIA GPU to the
+    # container, which is what DDP/FSDP/ZeRO-3 need. To pin specific GPUs use
+    # `device_ids: ['0','1','2','3']` instead of `count`. NVIDIA Container
+    # Toolkit must be installed on the host. Comment the whole `deploy` block
+    # for CPU-only operation.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # NCCL needs shared-mem >64MB and IPC=host for stable multi-GPU collectives.
+    shm_size: "8gb"
+    ipc: host
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    labels:
+      # CasaOS metadata (shows up in the CasaOS dashboard)
+      casaos.icon: "https://cdn-icons-png.flaticon.com/512/8055/8055598.png"
+      casaos.name: "LM Trainer"
+      casaos.title: "LM Studio Trainer"
+      casaos.category: "AI"
+      casaos.port_map: "8765"
+
+volumes:
+  models:
+  data:
+  runs:
+  hf-cache:
