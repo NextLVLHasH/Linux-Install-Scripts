@@ -12,10 +12,26 @@ End-to-end install scripts for Ubuntu (and ZimaOS / CasaOS) that set up:
 
 ---
 
+## Get the code (Linux)
+
+```bash
+sudo apt update && sudo apt install -y git           # if git isn't already installed
+git clone https://github.com/NextLVLHasH/Linux-Install-Scripts.git
+cd Linux-Install-Scripts
+chmod +x *.sh                                        # make the installers executable
+```
+
+To grab updates later:
+
+```bash
+git pull
+```
+
+---
+
 ## Quick start (Ubuntu desktop)
 
 ```bash
-chmod +x install-all.sh
 ./install-all.sh                      # installs everything; reboot if NVIDIA driver was new
 ./09-start-dashboard.sh               # or just visit http://<host>:8765 — systemd already started it
 ```
