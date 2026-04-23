@@ -23,8 +23,16 @@ CONFIG_FILE="$STATE_DIR/config.env"
 # trigger a password prompt mid-install (a prompt writes to /dev/tty, which
 # bypasses our log redirect and corrupts the TUI). Keep the ticket alive in
 # the background for the full run.
-echo "Enter sudo password if prompted — required once for the whole install."
-sudo -v
+#
+# If an existing ticket is already valid (e.g. the caller ran `sudo -v` in
+# this shell just before invoking us), `sudo -n -v` succeeds silently and
+# we don't prompt. Otherwise fall through to an interactive prompt. This
+# also lets the script run under `timeout` / re-forked shells where sudo's
+# tty-keyed ticket lookup doesn't always carry.
+if ! sudo -n -v 2>/dev/null; then
+    echo "Enter sudo password if prompted — required once for the whole install."
+    sudo -v
+fi
 ( while kill -0 $$ 2>/dev/null; do sudo -n -v 2>/dev/null || true; sleep 50; done ) &
 SUDO_KEEPALIVE_PID=$!
 
