@@ -9,9 +9,12 @@ Endpoints:
   POST /api/upload-dataset   multipart file upload (.jsonl)
   POST /api/train            {model, dataset, output, epochs, batch_size, lr, lora_r}
   POST /api/cancel           cancel current job
-  POST /api/launch-lmstudio  launches LM Studio AppImage
   GET  /api/logs/stream      SSE log stream of current/last job
   GET  /                     dashboard UI
+
+LM Studio is controlled headlessly through /api/lms/* (uses the `lms` CLI
+and the LM Studio HTTP server on :1234). The dashboard does not launch the
+LM Studio GUI — if you want the GUI, run ./start-lmstudio.sh separately.
 """
 from __future__ import annotations
 
@@ -50,10 +53,6 @@ LMS_BIN       = Path.home() / ".lmstudio" / "bin" / "lms"
 LMS_MODELS_DIR = Path(os.environ.get("LMS_MODELS_DIR", str(Path.home() / ".lmstudio" / "models")))
 LMS_API_PORT  = int(os.environ.get("LMS_API_PORT", "1234"))
 LMS_API_BASE  = f"http://127.0.0.1:{LMS_API_PORT}"
-
-# Virtual display settings for headless LM Studio (mirrors start-lmstudio.sh defaults)
-VNC_DISPLAY = os.environ.get("VNC_DISPLAY", "99")
-NOVNC_PORT = int(os.environ.get("NOVNC_PORT", "6080"))
 
 
 class Job:
@@ -195,42 +194,6 @@ AGENT = AgentManager()
 app = FastAPI(title="LM Studio Dashboard")
 
 
-def _lmstudio_env() -> dict[str, str]:
-    """Environment for LM Studio: prefer the virtual display, fall back to real one."""
-    env = os.environ.copy()
-    # If our Xvfb virtual display is running, use it; otherwise fall back to whatever is set.
-    if not env.get("DISPLAY") or env.get("DISPLAY") == f":{VNC_DISPLAY}":
-        env["DISPLAY"] = f":{VNC_DISPLAY}"
-    return env
-
-
-def _auto_launch_lmstudio() -> None:
-    """Launch LM Studio alongside the dashboard.
-    Uses the virtual display (:VNC_DISPLAY) so it works headless.
-    Disable by setting AUTO_LAUNCH_LMSTUDIO=0."""
-    if os.environ.get("AUTO_LAUNCH_LMSTUDIO", "1") == "0":
-        return
-    if not LMSTUDIO_PATH.exists():
-        print(f"[startup] LM Studio not found at {LMSTUDIO_PATH}, skipping auto-launch.")
-        return
-    try:
-        subprocess.Popen(
-            [str(LMSTUDIO_PATH), "--no-sandbox"],
-            env=_lmstudio_env(),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        print(f"[startup] Launched LM Studio on DISPLAY=:{VNC_DISPLAY} (noVNC port {NOVNC_PORT})")
-    except Exception as e:
-        print(f"[startup] Failed to launch LM Studio: {e}")
-
-
-@app.on_event("startup")
-def _on_startup() -> None:
-    _auto_launch_lmstudio()
-
-
 # ---------- listings ----------
 
 def list_models() -> list[dict[str, Any]]:
@@ -332,7 +295,6 @@ def get_state() -> dict[str, Any]:
         "runs": list_runs(),
         "lmstudio_installed": LMSTUDIO_PATH.exists(),
         "lmstudio_path": str(LMSTUDIO_PATH),
-        "lmstudio_novnc_port": NOVNC_PORT,
         "gpu": _gpu_summary(),
     }
 
@@ -564,20 +526,6 @@ async def agent_stream():
             })}
             await asyncio.sleep(0.4)
     return EventSourceResponse(gen())
-
-
-@app.post("/api/launch-lmstudio")
-def launch_lmstudio() -> dict[str, Any]:
-    if not LMSTUDIO_PATH.exists():
-        raise HTTPException(404, f"LM Studio not found at {LMSTUDIO_PATH}")
-    subprocess.Popen(
-        [str(LMSTUDIO_PATH), "--no-sandbox"],
-        env=_lmstudio_env(),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
-    return {"ok": True, "novnc_port": NOVNC_PORT}
 
 
 # ─────────────────────────────────────────────────────────────

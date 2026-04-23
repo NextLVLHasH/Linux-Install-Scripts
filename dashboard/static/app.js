@@ -267,15 +267,6 @@ function openLogStream() {
 
 // ---- wire up controls ----
 
-$('#btn-launch-lmstudio').addEventListener('click', async () => {
-  try {
-    await api('/api/launch-lmstudio', { method: 'POST' });
-    toast('LM Studio launched');
-  } catch (e) {
-    toast(e.message);
-  }
-});
-
 $('#btn-download').addEventListener('click', async () => {
   const repo = $('#dl-repo').value.trim();
   const token = $('#dl-token').value.trim() || null;
