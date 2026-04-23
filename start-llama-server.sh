@@ -26,8 +26,27 @@ LLAMA_THREADS="${LLAMA_THREADS:-$(nproc)}"
 # Qwen 2.5 7B: 2×4×128×28×2 = 57344 B/tok. Default tuned to that; override for
 # other architectures (e.g. MoE / 70B models use much more).
 KV_BYTES_PER_TOKEN="${KV_BYTES_PER_TOKEN:-57344}"
-# Observed ~500 MiB of non-KV overhead on this box — 768 leaves a small buffer.
-OVERHEAD_MB="${OVERHEAD_MB:-768}"
+# Tight overhead budget: llama-server itself reserves ~300–400 MiB for compute
+# buffers on top of KV + model weights. 512 fills VRAM to ~95 %; leave more
+# headroom if you hit OOM at load or during long prompts.
+OVERHEAD_MB="${OVERHEAD_MB:-512}"
+
+# ── throughput knobs ──────────────────────────────────────────────────────
+# Flash Attention: 20–40 % prefill + a bit of decode speedup, costs no extra
+# VRAM on llama.cpp's Vulkan/CUDA backends. `auto` lets llama.cpp pick on
+# backends that can't safely enable it; `on` forces it.
+LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-on}"
+# Batch sizes control prompt-prefill parallelism. Bigger = faster prefill,
+# more VRAM. Defaults here push the 3060 harder than llama-server's default
+# 2048/512 while staying well inside the budget at ctx≈130K.
+LLAMA_BATCH="${LLAMA_BATCH:-4096}"
+LLAMA_UBATCH="${LLAMA_UBATCH:-1024}"
+# Single-user boxes should only reserve one KV slot; default 4 would split
+# VRAM into 4 parallel sequences and leave ctx/4 per query.
+LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
+# Use mlock to keep the model pages in RAM (prevents paging to disk under
+# pressure). Harmless on GPU-offloaded setups too.
+LLAMA_MLOCK="${LLAMA_MLOCK:-1}"
 
 if [[ ! -x "$LLAMA_BIN" ]]; then
     echo "ERROR: llama-server not found at $LLAMA_BIN"
@@ -82,11 +101,15 @@ if [[ -z "${LLAMA_CTX:-}" ]]; then
 fi
 
 echo "==> llama-server args:"
-echo "    model   : $MODEL"
-echo "    bind    : ${LLAMA_BIND}:${LLAMA_PORT}"
-echo "    ctx     : $LLAMA_CTX"
-echo "    gpu-layers: $LLAMA_NGL"
-echo "    threads : $LLAMA_THREADS"
+echo "    model       : $MODEL"
+echo "    bind        : ${LLAMA_BIND}:${LLAMA_PORT}"
+echo "    ctx         : $LLAMA_CTX"
+echo "    gpu-layers  : $LLAMA_NGL"
+echo "    threads     : $LLAMA_THREADS"
+echo "    flash-attn  : $LLAMA_FLASH_ATTN"
+echo "    batch/ubatch: ${LLAMA_BATCH}/${LLAMA_UBATCH}"
+echo "    parallel    : $LLAMA_PARALLEL"
+echo "    mlock       : $LLAMA_MLOCK"
 
 # ── check port is free ──────────────────────────────────────────────────
 if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${LLAMA_PORT}\$"; then
@@ -106,10 +129,18 @@ echo "  llama-server → http://${LLAMA_BIND}:${LLAMA_PORT}/v1"
 echo "════════════════════════════════════════════════"
 echo ""
 
+EXTRA_ARGS=()
+[[ "$LLAMA_MLOCK" == "1" ]] && EXTRA_ARGS+=(--mlock)
+
 exec "$LLAMA_BIN" \
     -m "$MODEL" \
     --host "$LLAMA_BIND" \
     --port "$LLAMA_PORT" \
     -c "$LLAMA_CTX" \
     -ngl "$LLAMA_NGL" \
-    -t "$LLAMA_THREADS"
+    -t "$LLAMA_THREADS" \
+    -b "$LLAMA_BATCH" \
+    -ub "$LLAMA_UBATCH" \
+    -fa "$LLAMA_FLASH_ATTN" \
+    --parallel "$LLAMA_PARALLEL" \
+    "${EXTRA_ARGS[@]}"
