@@ -346,6 +346,10 @@ for i in "${!S_NAME[@]}"; do
         printf "  Remaining steps will resume automatically after reboot.\n"
         printf "  To follow progress after reboot:\n"
         printf "    journalctl -u %s -f\n\n" "$SERVICE_NAME"
+        if [[ -n "${NO_REBOOT:-}" ]]; then
+            printf "  NO_REBOOT set — exiting instead of rebooting.\n"
+            exit 0
+        fi
         printf "  Rebooting in 10 seconds… (Ctrl+C to cancel)\n"
         sleep 10
         sudo reboot
@@ -364,6 +368,10 @@ if [[ ${#FAILED[@]} -eq 0 ]]; then
     printf "\n${GREEN}${BOLD}  ✔  All steps complete!${RESET}\n\n"
     printf "  Dashboard  →  ${CYAN}http://%s:8765${RESET}\n" "$IP"
     printf "  Logs       →  ${DIM}%s/${RESET}\n\n" "$LOG_DIR"
+    if [[ -n "${NO_REBOOT:-}" ]]; then
+        printf "${YELLOW}  NO_REBOOT set — skipping final reboot.${RESET}\n\n"
+        exit 0
+    fi
     printf "${YELLOW}  Rebooting in 10 seconds to apply any remaining kernel changes…${RESET}\n"
     printf "  Press Ctrl+C to cancel.\n"
     sleep 10
