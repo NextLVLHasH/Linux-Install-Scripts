@@ -5,8 +5,14 @@ set -euo pipefail
 
 VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
 
-echo "==> Creating Python venv at: $VENV_DIR"
-python3 -m venv "$VENV_DIR"
+# Idempotent: re-use an existing venv (e.g. one created by 03a-create-venv.sh
+# before NVIDIA/CUDA so downstream steps could populate it) instead of failing.
+if [[ -x "$VENV_DIR/bin/python" ]]; then
+    echo "==> Re-using existing venv at $VENV_DIR"
+else
+    echo "==> Creating Python venv at: $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+fi
 
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"

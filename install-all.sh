@@ -38,10 +38,18 @@ SUDO_KEEPALIVE_PID=$!
 
 sudo mkdir -p "$STATE_DIR" "$LOG_DIR"
 
+# If a previous run persisted paths to config.env, source them FIRST so the
+# post-reboot resume (which runs as root under systemd) doesn't recompute
+# REAL_USER/REAL_HOME as root/root and stomp the user's venv location.
+if [[ -r "$CONFIG_FILE" ]]; then
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+fi
+
 # Resolve the *real* user's home even if the installer was launched with sudo,
 # so paths like ~/pytorch-env don't accidentally land under /root.
-REAL_USER="${SUDO_USER:-$USER}"
-REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
+REAL_USER="${REAL_USER:-${SUDO_USER:-$USER}}"
+REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
 
 # Export + persist the shared install paths so every child step and any later
@@ -50,6 +58,7 @@ REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
 export INSTALL_DIR="$SCRIPT_DIR"
 export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
 export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
+export REAL_USER REAL_HOME
 
 # Force apt/dpkg into fully non-interactive mode so no step can hang on a
 # debconf prompt or a "keep local config?" dialog (which would crash out
@@ -94,22 +103,62 @@ fi
 SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
 
 # ── step registry ──────────────────────────────────────────────────────────
-declare -a S_NAME S_SCRIPT S_SKIP S_STATUS
+declare -a S_NAME S_SCRIPT S_SKIP S_CHECK S_STATUS
 
-_add() { S_NAME+=("$1"); S_SCRIPT+=("$2"); S_SKIP+=("$3"); S_STATUS+=(pending); }
+# _add <label> <script> <skip_env_var> [<check_fn>]
+# check_fn: optional bash function that returns 0 when the step is already
+# satisfied on this system. If it returns 0, install-all.sh auto-skips the
+# step (and writes the success marker) without needing any env var set.
+_add() {
+    S_NAME+=("$1"); S_SCRIPT+=("$2"); S_SKIP+=("$3")
+    S_CHECK+=("${4:-}"); S_STATUS+=(pending)
+}
 
-_add "System update"       "01-update-system.sh"           "SKIP_UPDATE"
-_add "Prerequisites"       "02-install-prerequisites.sh"   "SKIP_PREREQS"
-_add "NVIDIA / CUDA"       "03-install-nvidia-cuda.sh"     "SKIP_NVIDIA"   # index 2
-_add "PyTorch"             "04-install-pytorch.sh"         "SKIP_PYTORCH"
-_add "LM Studio"           "05-install-lmstudio.sh"        "SKIP_LMSTUDIO"
-_add "Training deps"       "06-install-training-deps.sh"   "SKIP_TRAINING"
-_add "Dashboard"           "08-install-dashboard.sh"       "SKIP_DASHBOARD"
-_add "Cybersec datasets"   "11-fetch-cybersec-datasets.sh" "SKIP_CYBERSEC"
-_add "Systemd service"     "10-install-systemd.sh"         "SKIP_SYSTEMD"
+# ── already-installed detectors ───────────────────────────────────────────
+# Each returns 0 ("skip, already done") or 1 ("needs running"). Deliberately
+# cheap — anything slow belongs inside the step script itself.
+_chk_prereqs() {
+    dpkg -s build-essential cmake dkms python3-venv libgomp1 \
+        >/dev/null 2>&1
+}
+_chk_venv()      { [[ -x "$VENV_DIR/bin/python" ]]; }
+_chk_lmstudio()  { [[ -f "$LMSTUDIO_DIR/LMStudio.AppImage" ]]; }
+_chk_dashboard() {
+    [[ -x "$VENV_DIR/bin/python" ]] && \
+        "$VENV_DIR/bin/python" -c "import uvicorn, fastapi" >/dev/null 2>&1
+}
+_chk_cybersec()  { [[ -d "$SCRIPT_DIR/data/cybersec-catalog/.git" ]]; }
+_chk_systemd()   { [[ -f /etc/systemd/system/lmstudio-dashboard.service ]]; }
+_chk_nvidia()    {
+    command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1
+}
+_chk_pytorch()   {
+    [[ -x "$VENV_DIR/bin/python" ]] && \
+        "$VENV_DIR/bin/python" -c "import torch" >/dev/null 2>&1
+}
+_chk_training_deps() {
+    [[ -x "$VENV_DIR/bin/python" ]] && \
+        "$VENV_DIR/bin/python" -c "import transformers, peft, trl" >/dev/null 2>&1
+}
+
+# Ordered so everything that doesn't need a GPU or PyTorch runs first.
+# The venv is created empty at index 2 so downstream steps (dashboard,
+# cybersec) can populate it. NVIDIA/CUDA is deliberately near the end so
+# the mid-install reboot doesn't interrupt work that can proceed without
+# the GPU. PyTorch + training deps go last so they pick up CUDA.
+_add "System update"       "01-update-system.sh"           "SKIP_UPDATE"     ""                    # 0
+_add "Prerequisites"       "02-install-prerequisites.sh"   "SKIP_PREREQS"    "_chk_prereqs"        # 1
+_add "Create venv"         "03a-create-venv.sh"            "SKIP_VENV"       "_chk_venv"           # 2
+_add "LM Studio"           "05-install-lmstudio.sh"        "SKIP_LMSTUDIO"   "_chk_lmstudio"       # 3
+_add "Dashboard"           "08-install-dashboard.sh"       "SKIP_DASHBOARD"  "_chk_dashboard"      # 4
+_add "Cybersec datasets"   "11-fetch-cybersec-datasets.sh" "SKIP_CYBERSEC"   "_chk_cybersec"       # 5
+_add "Systemd service"     "10-install-systemd.sh"         "SKIP_SYSTEMD"    "_chk_systemd"        # 6
+_add "NVIDIA / CUDA"       "03-install-nvidia-cuda.sh"     "SKIP_NVIDIA"     "_chk_nvidia"         # 7 (reboot trigger)
+_add "PyTorch"             "04-install-pytorch.sh"         "SKIP_PYTORCH"    "_chk_pytorch"        # 8
+_add "Training deps"       "06-install-training-deps.sh"   "SKIP_TRAINING"   "_chk_training_deps"  # 9
 
 TOTAL=${#S_NAME[@]}
-NVIDIA_IDX=2   # index of the NVIDIA step above
+NVIDIA_IDX=7   # index of the NVIDIA step above — triggers the reboot check
 
 # ── cleanup ────────────────────────────────────────────────────────────────
 _tput civis
@@ -247,12 +296,21 @@ _marker_path() {
     printf '%s/done.%s' "$STATE_DIR" "${S_SCRIPT[$1]%.sh}"
 }
 
-# A step is considered already installed if its success marker exists,
-# or if the caller explicitly set SKIP_<STEP>=1.
+# A step is considered already installed if any of these are true:
+#   1) The caller explicitly set SKIP_<STEP>=1.
+#   2) A success marker from a previous run exists.
+#   3) The step's check function (if defined) says its artifact is present
+#      on the system — e.g. the user pre-installed NVIDIA drivers by hand,
+#      or PyTorch is already importable in the venv. In that case we also
+#      write a marker so later runs skip via the faster marker path.
 _should_skip() {
-    local i=$1 skip_var="${S_SKIP[$i]}"
+    local i=$1 skip_var="${S_SKIP[$i]}" chk="${S_CHECK[$i]:-}"
     [[ -n "${!skip_var:-}" ]] && return 0
     [[ -f "$(_marker_path "$i")" ]] && return 0
+    if [[ -n "$chk" ]] && "$chk" 2>/dev/null; then
+        _mark_done "$i"
+        return 0
+    fi
     return 1
 }
 
