@@ -9,6 +9,7 @@ Type=simple
 User=__USER__
 Group=__USER__
 WorkingDirectory=__INSTALL_DIR__
+Environment=INSTALL_DIR=__INSTALL_DIR__
 Environment=AUTO_LAUNCH_LMSTUDIO=1
 Environment=DASHBOARD_HOST=0.0.0.0
 Environment=DASHBOARD_PORT=8765
