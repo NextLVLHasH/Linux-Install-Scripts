@@ -646,11 +646,33 @@ async function lmsRefreshVram() {
   } catch {}
 }
 
-// Poll VRAM every 3 s (only wastes resources if the tab is open, acceptable)
-setInterval(() => {
+// Live auto-refresh: while the LM Studio tab is visible, poll the full
+// status every 2.5 s so loaded model, backend, server state, and the VRAM
+// chart all move together. When the tab isn't active we skip the call so
+// we don't burn the network / GPU query bandwidth for a view nobody's
+// looking at. A faster 1 s VRAM-only poll runs on top of that for the
+// smoothest chart motion during active inference.
+let _lmsPollInflight = false;
+async function _lmsTick(fullStatus) {
+  if (_lmsPollInflight) return;
   const active = document.querySelector('.tab-panel.active');
-  if (active && active.dataset.tab === 'lmstudio') lmsRefreshVram();
-}, 3000);
+  if (!active || active.dataset.tab !== 'lmstudio') return;
+  _lmsPollInflight = true;
+  try {
+    if (fullStatus) await lmsRefresh();
+    else           await lmsRefreshVram();
+  } finally {
+    _lmsPollInflight = false;
+  }
+}
+setInterval(() => _lmsTick(true),  2500);   // full status (covers VRAM)
+setInterval(() => _lmsTick(false), 1000);   // VRAM-only between full ticks
+
+// Also refresh immediately whenever the tab becomes visible again after the
+// user had another app in focus — no waiting for the next interval tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') _lmsTick(true);
+});
 
 document.getElementById('btn-lms-start').addEventListener('click', async () => {
   const port       = parseInt(document.getElementById('lms-port').value, 10) || 1234;
