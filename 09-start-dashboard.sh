@@ -40,13 +40,46 @@ export XAUTHORITY="${XAUTHORITY:-$REAL_HOME/.Xauthority}"
 HOST="$DASHBOARD_HOST"
 PORT="$DASHBOARD_PORT"
 
+# Bootstrap the venv + dashboard deps if they're missing, so this script can
+# be the single entry point after a fresh clone. Each step is idempotent and
+# safe to re-run.
+_run_as_user() {
+    # Run an installer script as the real user (never as root) so the venv
+    # ends up under REAL_HOME and is owned by them.
+    if [[ -n "${SUDO_USER:-}" && "$(id -u)" == "0" ]]; then
+        sudo -u "$REAL_USER" -H "$@"
+    else
+        "$@"
+    fi
+}
+
 if [[ ! -d "$VENV_DIR" ]]; then
-    echo "ERROR: venv not found at $VENV_DIR. Run ./04-install-pytorch.sh first."
+    # Prereqs (python3-venv, curl, etc.) are required for `python3 -m venv` to
+    # work. This step needs root, so we don't drop to REAL_USER for it.
+    if ! dpkg -s python3-venv >/dev/null 2>&1; then
+        echo "==> Prerequisites missing — running 02-install-prerequisites.sh..."
+        sudo "$SCRIPT_DIR/02-install-prerequisites.sh"
+    fi
+    echo "==> venv missing at $VENV_DIR — running 04-install-pytorch.sh..."
+    _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/04-install-pytorch.sh"
+fi
+
+if [[ ! -d "$VENV_DIR" ]]; then
+    echo "ERROR: venv still not found at $VENV_DIR after bootstrap."
+    echo "       Inspect ./04-install-pytorch.sh output above and re-run."
     exit 1
 fi
 
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
+
+if ! python -c "import uvicorn, fastapi" >/dev/null 2>&1; then
+    echo "==> Dashboard deps missing in venv — running 08-install-dashboard.sh..."
+    deactivate
+    _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/08-install-dashboard.sh"
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+fi
 
 # Start the LM Studio HTTP server before the dashboard so the first request
 # doesn't race the server coming up. Skip silently if already running or if

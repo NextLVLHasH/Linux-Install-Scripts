@@ -18,6 +18,16 @@ REBOOT_MARKER="$STATE_DIR/.needs-reboot"
 SERVICE_NAME="ml-stack-resume"
 LOG_DIR="${LOG_DIR:-$STATE_DIR/logs}"
 CONFIG_FILE="$STATE_DIR/config.env"
+
+# Prime sudo up front so that step scripts which call `sudo` internally never
+# trigger a password prompt mid-install (a prompt writes to /dev/tty, which
+# bypasses our log redirect and corrupts the TUI). Keep the ticket alive in
+# the background for the full run.
+echo "Enter sudo password if prompted — required once for the whole install."
+sudo -v
+( while kill -0 $$ 2>/dev/null; do sudo -n -v 2>/dev/null || true; sleep 50; done ) &
+SUDO_KEEPALIVE_PID=$!
+
 sudo mkdir -p "$STATE_DIR" "$LOG_DIR"
 
 # Resolve the *real* user's home even if the installer was launched with sudo,
@@ -76,7 +86,11 @@ NVIDIA_IDX=2   # index of the NVIDIA step above
 
 # ── cleanup ────────────────────────────────────────────────────────────────
 _tput civis
-_cleanup() { _tput cnorm; printf '\n'; }
+_cleanup() {
+    _tput cnorm
+    [[ -n "${SUDO_KEEPALIVE_PID:-}" ]] && kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true
+    printf '\n'
+}
 trap _cleanup EXIT INT TERM
 
 # ── drawing ────────────────────────────────────────────────────────────────
@@ -234,7 +248,10 @@ _run_step() {
     _move_up "$BODY_ROWS"; _draw_body "$TICK"
 
     local xf; xf=$(mktemp)
-    ( "./${S_SCRIPT[$i]}" >"$log" 2>&1; echo $? >"$xf" ) &
+    # </dev/null guarantees the step script can never block on a terminal read
+    # (e.g. an expired sudo prompt or apt's "Do you want to continue?" if a
+    # step forgot -y). sudo should already be primed by the keepalive.
+    ( "./${S_SCRIPT[$i]}" </dev/null >"$log" 2>&1; echo $? >"$xf" ) &
     local bg=$!
 
     while kill -0 "$bg" 2>/dev/null; do
@@ -268,7 +285,7 @@ _plain_run() {
         S_STATUS[$i]=skipped; return 0
     fi
     echo "-- Running:  ${S_NAME[$i]} …"
-    if "./${S_SCRIPT[$i]}" >"$log" 2>&1; then
+    if "./${S_SCRIPT[$i]}" </dev/null >"$log" 2>&1; then
         S_STATUS[$i]=done;   echo "-- Done:     ${S_NAME[$i]}"
         _mark_done "$i"
     else
