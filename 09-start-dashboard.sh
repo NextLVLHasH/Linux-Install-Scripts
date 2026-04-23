@@ -124,29 +124,53 @@ fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 
-# If something else is already on $PORT, don't crash uvicorn with an ugly
-# "address already in use" stacktrace — check first and bail out cleanly.
-# Typically this means the systemd-managed lmstudio-dashboard.service is
-# already serving the dashboard.
+# Port-conflict handling. Under systemd (INVOCATION_ID is set) we kill any
+# orphan uvicorn still holding the port — these appear after a bad restart
+# where the previous instance wasn't cleanly torn down, and if we *don't*
+# kill them, `systemctl restart` ends up as a silent no-op because this
+# script exits 0 before binding anything.
+#
+# When run interactively, we keep the old "don't double-start" behaviour:
+# print a clear message and exit 0 so the user doesn't get an ugly
+# uvicorn stacktrace on top of whatever is already serving the dashboard.
 if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}\$"; then
-    EXISTING_PID=$(ss -tlnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p {print $NF}' | head -1)
-    echo ""
-    echo "════════════════════════════════════════════════"
-    echo "  Port ${PORT} already in use — not starting a second dashboard."
-    echo "  Existing listener: ${EXISTING_PID:-unknown}"
-    echo ""
-    if systemctl is-active --quiet lmstudio-dashboard.service 2>/dev/null; then
-        echo "  lmstudio-dashboard.service is running it — that's expected."
-        echo "  Open: http://${IP}:${PORT}"
-        echo "  To restart it: sudo systemctl restart lmstudio-dashboard.service"
-        echo "  To run it by hand instead:"
-        echo "    sudo systemctl stop lmstudio-dashboard.service && ./09-start-dashboard.sh"
+    HOLDER_PIDS=$(ss -tlnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p' \
+                    | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+
+    if [[ -n "${INVOCATION_ID:-}" ]]; then
+        echo "==> Port ${PORT} held by orphan pid(s): ${HOLDER_PIDS:-?} — killing..."
+        for pid in $HOLDER_PIDS; do
+            [[ "$pid" == "$$" ]] && continue
+            kill -TERM "$pid" 2>/dev/null || true
+        done
+        # Give them 3s to shut down, then SIGKILL whatever remains.
+        for _ in 1 2 3; do
+            sleep 1
+            ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}\$" || break
+        done
+        for pid in $HOLDER_PIDS; do
+            [[ "$pid" == "$$" ]] && continue
+            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+        done
     else
-        echo "  Stop whatever is using the port, or set DASHBOARD_PORT=<other>."
+        echo ""
+        echo "════════════════════════════════════════════════"
+        echo "  Port ${PORT} already in use — not starting a second dashboard."
+        echo "  Existing listener: pid(s) ${HOLDER_PIDS:-unknown}"
+        echo ""
+        if systemctl is-active --quiet lmstudio-dashboard.service 2>/dev/null; then
+            echo "  lmstudio-dashboard.service is running it — that's expected."
+            echo "  Open: http://${IP}:${PORT}"
+            echo "  To restart it: sudo systemctl restart lmstudio-dashboard.service"
+            echo "  To run it by hand instead:"
+            echo "    sudo systemctl stop lmstudio-dashboard.service && ./09-start-dashboard.sh"
+        else
+            echo "  Stop whatever is using the port, or set DASHBOARD_PORT=<other>."
+        fi
+        echo "════════════════════════════════════════════════"
+        echo ""
+        exit 0
     fi
-    echo "════════════════════════════════════════════════"
-    echo ""
-    exit 0
 fi
 
 echo ""
