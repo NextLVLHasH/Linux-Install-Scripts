@@ -10,8 +10,10 @@ Cmnd_Alias ML_STACK_SERVICES = \
     /bin/systemctl start llama-server.service, \
     /bin/systemctl stop llama-server.service, \
     /bin/systemctl restart llama-server.service, \
+    /bin/systemctl reset-failed llama-server.service, \
     /bin/systemctl start lmstudio-dashboard.service, \
     /bin/systemctl stop lmstudio-dashboard.service, \
-    /bin/systemctl restart lmstudio-dashboard.service
+    /bin/systemctl restart lmstudio-dashboard.service, \
+    /bin/systemctl reset-failed lmstudio-dashboard.service
 
 __USER__ ALL=(root) NOPASSWD: ML_STACK_SERVICES

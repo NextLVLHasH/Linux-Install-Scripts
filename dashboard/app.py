@@ -733,7 +733,20 @@ def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
     # llama-server path: start the systemd unit. The unit is the source of
     # truth for bind/port/model — we don't pass request params through here.
     if _llama_server_status().get("present"):
+        # If the unit is in "failed" state (e.g. because the user clicked
+        # Start/Stop/Start fast enough to trip StartLimitBurst=5), systemd
+        # refuses to start it until the failure counter is cleared. Clear
+        # it automatically so the Start button always actually starts.
+        cur = _llama_server_status()
+        if cur.get("ActiveState") == "failed" or cur.get("SubState") == "failed":
+            _systemctl("reset-failed", LLAMA_SERVER_UNIT)
         ok, err = _systemctl("start", LLAMA_SERVER_UNIT)
+        # One retry via reset-failed + start in case the state changed
+        # between our check and the start attempt (common when the user
+        # clicks Stop → Start quickly and the unit is momentarily 'failed').
+        if not ok and ("StartLimit" in err or "failed" in err.lower()):
+            _systemctl("reset-failed", LLAMA_SERVER_UNIT)
+            ok, err = _systemctl("start", LLAMA_SERVER_UNIT)
         if not ok:
             raise HTTPException(500, f"systemctl start failed: {err}")
         return {"ok": True, "backend": "llama-server"}
