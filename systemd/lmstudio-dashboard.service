@@ -22,6 +22,11 @@ Environment=XAUTHORITY=__HOME__/.Xauthority
 ExecStart=__INSTALL_DIR__/09-start-dashboard.sh
 Restart=on-failure
 RestartSec=5
+# Safety net: if the dashboard fails 5 times in 5 minutes, stop restarting.
+# Prevents runaway loops (we once hit 107 restarts) when the venv is missing
+# or a dep is busted. Run `systemctl reset-failed` to retry after fixing.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Install]
 WantedBy=multi-user.target

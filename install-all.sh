@@ -43,6 +43,25 @@ export INSTALL_DIR="$SCRIPT_DIR"
 export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
 export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
 
+# Force apt/dpkg into fully non-interactive mode so no step can hang on a
+# debconf prompt or a "keep local config?" dialog (which would crash out
+# under </dev/null and cause steps to fail in ~1s — showing up as the bar
+# bouncing 11→12→11 as each step flashes by failing).
+export DEBIAN_FRONTEND=noninteractive
+export NEEDRESTART_MODE=a
+export APT_LISTCHANGES_FRONTEND=none
+
+# Drop in an apt config so dpkg keeps existing config files automatically
+# during upgrades (equivalent to --force-confdef --force-confold on every
+# apt-get call). Written once, harmless to leave in place.
+sudo tee /etc/apt/apt.conf.d/99-ml-stack-noninteractive >/dev/null <<'APTCONF'
+Dpkg::Options {
+    "--force-confdef";
+    "--force-confold";
+};
+APT::Get::Assume-Yes "true";
+APTCONF
+
 sudo tee "$CONFIG_FILE" >/dev/null <<CONF
 # ml-stack install config — auto-generated, safe to source
 INSTALL_DIR=$INSTALL_DIR

@@ -21,9 +21,20 @@ sudo sed \
     -e "s|__HOME__|$USER_HOME|g" \
     "$TEMPLATE" | sudo tee "$TARGET" >/dev/null
 
-echo "==> Reloading systemd and enabling service..."
+echo "==> Reloading systemd..."
 sudo systemctl daemon-reload
-sudo systemctl enable --now lmstudio-dashboard.service
+
+# Only start the service if the venv is already in place — starting it against
+# a missing venv previously put 09-start-dashboard.sh into a 5s sudo-prompt
+# restart loop (see restart-limit fields in the unit file for a safety net).
+if [[ -d "$VENV_DIR" ]] && [[ -f "$VENV_DIR/bin/activate" ]]; then
+    echo "==> venv present — enabling and starting service..."
+    sudo systemctl enable --now lmstudio-dashboard.service
+else
+    echo "==> venv not found at $VENV_DIR — enabling for next boot only."
+    echo "    (Start manually with: sudo systemctl start lmstudio-dashboard.service)"
+    sudo systemctl enable lmstudio-dashboard.service
+fi
 
 echo "==> Done. Status:"
 sudo systemctl --no-pager status lmstudio-dashboard.service || true

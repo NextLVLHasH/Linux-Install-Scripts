@@ -40,12 +40,14 @@ export XAUTHORITY="${XAUTHORITY:-$REAL_HOME/.Xauthority}"
 HOST="$DASHBOARD_HOST"
 PORT="$DASHBOARD_PORT"
 
-# Bootstrap the venv + dashboard deps if they're missing, so this script can
-# be the single entry point after a fresh clone. Each step is idempotent and
-# safe to re-run.
+# Interactive bootstrap — only when run by a human. Under systemd there's no
+# TTY, sudo can't prompt, and a missing venv would otherwise put us in a 5s
+# restart loop (we hit this: 107 restarts before we caught it). Detect that
+# case and exit 0 (success, so systemd doesn't restart) with a clear message.
+_is_interactive() { [[ -t 0 && -t 1 ]] && [[ -z "${INVOCATION_ID:-}" ]]; }
+_running_under_systemd() { [[ -n "${INVOCATION_ID:-}" ]]; }
+
 _run_as_user() {
-    # Run an installer script as the real user (never as root) so the venv
-    # ends up under REAL_HOME and is owned by them.
     if [[ -n "${SUDO_USER:-}" && "$(id -u)" == "0" ]]; then
         sudo -u "$REAL_USER" -H "$@"
     else
@@ -53,30 +55,50 @@ _run_as_user() {
     fi
 }
 
-if [[ ! -d "$VENV_DIR" ]]; then
-    # Prereqs (python3-venv, curl, etc.) are required for `python3 -m venv` to
-    # work. This step needs root, so we don't drop to REAL_USER for it.
-    if ! dpkg -s python3-venv >/dev/null 2>&1; then
-        echo "==> Prerequisites missing — running 02-install-prerequisites.sh..."
-        sudo "$SCRIPT_DIR/02-install-prerequisites.sh"
+_need_bootstrap() {
+    [[ ! -d "$VENV_DIR" ]] && return 0
+    source "$VENV_DIR/bin/activate" 2>/dev/null || return 0
+    python -c "import uvicorn, fastapi" >/dev/null 2>&1 || { deactivate 2>/dev/null; return 0; }
+    deactivate 2>/dev/null
+    return 1
+}
+
+if _need_bootstrap; then
+    if ! _is_interactive; then
+        # Don't attempt to sudo/apt without a TTY. Exit 0 so systemd does NOT
+        # restart us into a loop; the next boot (after a successful install)
+        # will find everything in place.
+        echo "==> Dashboard not yet installed (venv or deps missing)."
+        echo "    Run ./install-all.sh from a terminal to complete the install."
+        _running_under_systemd && echo "    Service will remain idle until then."
+        exit 0
     fi
-    echo "==> venv missing at $VENV_DIR — running 04-install-pytorch.sh..."
-    _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/04-install-pytorch.sh"
-fi
 
-if [[ ! -d "$VENV_DIR" ]]; then
-    echo "ERROR: venv still not found at $VENV_DIR after bootstrap."
-    echo "       Inspect ./04-install-pytorch.sh output above and re-run."
-    exit 1
-fi
+    if [[ ! -d "$VENV_DIR" ]]; then
+        if ! dpkg -s python3-venv >/dev/null 2>&1; then
+            echo "==> Prerequisites missing — running 02-install-prerequisites.sh..."
+            sudo "$SCRIPT_DIR/02-install-prerequisites.sh"
+        fi
+        echo "==> venv missing at $VENV_DIR — running 04-install-pytorch.sh..."
+        _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/04-install-pytorch.sh"
+    fi
 
-# shellcheck disable=SC1091
-source "$VENV_DIR/bin/activate"
+    if [[ ! -d "$VENV_DIR" ]]; then
+        echo "ERROR: venv still not found at $VENV_DIR after bootstrap."
+        exit 1
+    fi
 
-if ! python -c "import uvicorn, fastapi" >/dev/null 2>&1; then
-    echo "==> Dashboard deps missing in venv — running 08-install-dashboard.sh..."
-    deactivate
-    _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/08-install-dashboard.sh"
+    # shellcheck disable=SC1091
+    source "$VENV_DIR/bin/activate"
+
+    if ! python -c "import uvicorn, fastapi" >/dev/null 2>&1; then
+        echo "==> Dashboard deps missing in venv — running 08-install-dashboard.sh..."
+        deactivate
+        _run_as_user env VENV_DIR="$VENV_DIR" "$SCRIPT_DIR/08-install-dashboard.sh"
+        # shellcheck disable=SC1091
+        source "$VENV_DIR/bin/activate"
+    fi
+else
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
 fi
