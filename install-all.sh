@@ -85,7 +85,7 @@ _draw_body() {
             pending) sym="${DIM}○${RESET}";                                label="${DIM}${name}${RESET}" ;;
             running) sym="${CYAN}${SPINNER[$((tick % 10))]}${RESET}";      label="${CYAN}${name}…${RESET}" ;;
             done)    sym="${GREEN}✔${RESET}";                               label="${name}" ;;
-            skipped) sym="${DIM}─${RESET}";                                label="${DIM}${name}  (skipped)${RESET}" ;;
+            skipped) sym="${DIM}─${RESET}";                                label="${DIM}${name}  (already installed)${RESET}" ;;
             failed)  sym="${RED}✗${RESET}";                                label="${RED}${name}  (failed — see log)${RESET}" ;;
         esac
         printf "  %b  %b\033[K\n" "$sym" "$label"
@@ -152,11 +152,33 @@ SERVICE
 FAILED=()
 TICK=0
 
-_run_step() {
-    local i=$1 skip_var="${S_SKIP[$1]}"
-    local log="$LOG_DIR/${i}_${S_NAME[$i]// /_}.log"
+_log_path() {
+    local i=$1 safe="${S_NAME[$i]//[^A-Za-z0-9._-]/_}"
+    printf '%s/%s_%s.log' "$LOG_DIR" "$i" "$safe"
+}
 
-    if [[ -n "${!skip_var:-}" ]]; then
+_marker_path() {
+    printf '%s/done.%s' "$STATE_DIR" "${S_SCRIPT[$1]%.sh}"
+}
+
+# A step is considered already installed if its success marker exists,
+# or if the caller explicitly set SKIP_<STEP>=1.
+_should_skip() {
+    local i=$1 skip_var="${S_SKIP[$i]}"
+    [[ -n "${!skip_var:-}" ]] && return 0
+    [[ -f "$(_marker_path "$i")" ]] && return 0
+    return 1
+}
+
+_mark_done() {
+    sudo touch "$(_marker_path "$1")" 2>/dev/null || true
+}
+
+_run_step() {
+    local i=$1
+    local log; log=$(_log_path "$i")
+
+    if _should_skip "$i"; then
         S_STATUS[$i]=skipped
         _move_up "$BODY_ROWS"; _draw_body "$TICK"
         return 0
@@ -182,6 +204,7 @@ _run_step() {
 
     if [[ "$rc" == "0" ]]; then
         S_STATUS[$i]=done
+        _mark_done "$i"
     else
         S_STATUS[$i]=failed
         FAILED+=("${S_NAME[$i]}  →  $log")
@@ -192,15 +215,16 @@ _run_step() {
 }
 
 _plain_run() {
-    local i=$1 skip_var="${S_SKIP[$1]}"
-    local log="$LOG_DIR/${i}_${S_NAME[$i]// /_}.log"
-    if [[ -n "${!skip_var:-}" ]]; then
-        echo "-- Skipping: ${S_NAME[$i]}"
+    local i=$1
+    local log; log=$(_log_path "$i")
+    if _should_skip "$i"; then
+        echo "-- Skipping: ${S_NAME[$i]} (already installed)"
         S_STATUS[$i]=skipped; return 0
     fi
     echo "-- Running:  ${S_NAME[$i]} …"
     if "./${S_SCRIPT[$i]}" >"$log" 2>&1; then
         S_STATUS[$i]=done;   echo "-- Done:     ${S_NAME[$i]}"
+        _mark_done "$i"
     else
         S_STATUS[$i]=failed; echo "-- FAILED:   ${S_NAME[$i]}  (log: $log)"
         FAILED+=("${S_NAME[$i]}  →  $log")
