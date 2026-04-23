@@ -32,7 +32,10 @@ export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
 export LMS_MODELS_DIR="${LMS_MODELS_DIR:-$REAL_HOME/.lmstudio/models}"
 export LMS_API_PORT="${LMS_API_PORT:-1234}"
 export AUTO_LAUNCH_LMSTUDIO="${AUTO_LAUNCH_LMSTUDIO:-1}"
-export DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
+# Default: bind to the current LAN IP, not 0.0.0.0. Keeps the dashboard
+# reachable from the LAN without exposing it on every interface.
+DASHBOARD_HOST_AUTO="$(hostname -I 2>/dev/null | awk '{print $1}')"
+export DASHBOARD_HOST="${DASHBOARD_HOST:-${DASHBOARD_HOST_AUTO:-127.0.0.1}}"
 export DASHBOARD_PORT="${DASHBOARD_PORT:-8765}"
 export DISPLAY="${DISPLAY:-:0}"
 export XAUTHORITY="${XAUTHORITY:-$REAL_HOME/.Xauthority}"
