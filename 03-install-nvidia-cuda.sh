@@ -57,15 +57,12 @@ if (( SECURE_BOOT )); then
     sudo apt-get update
     sudo apt-get install -y ubuntu-drivers-common
 
-    # Ask ubuntu-drivers for the recommended package for this GPU.
-    RECOMMENDED=$(ubuntu-drivers devices 2>/dev/null \
-        | awk '/recommended/ && /nvidia-driver-[0-9]+/ {for (i=1;i<=NF;i++) if ($i ~ /^nvidia-driver-[0-9]+/) {print $i; exit}}')
-
-    # Fall back to the latest plain `nvidia-driver-N` in the archive.
-    if [[ -z "$RECOMMENDED" ]]; then
-        RECOMMENDED=$(apt-cache search --names-only '^nvidia-driver-[0-9]+$' 2>/dev/null \
-            | awk '{print $1}' | sort -V | tail -1)
-    fi
+    # Pick the latest *proprietary* `nvidia-driver-<N>` (no -open, -server, or
+    # -server-open suffix). Ubuntu's `-open` variant is NVIDIA's open kernel
+    # module (github.com/NVIDIA/open-gpu-kernel-modules) which, while official
+    # NVIDIA code, is explicitly off the table per user requirements.
+    RECOMMENDED=$(apt-cache search --names-only '^nvidia-driver-[0-9]+$' 2>/dev/null \
+        | awk '{print $1}' | sort -V | tail -1)
 
     if [[ -z "$RECOMMENDED" ]]; then
         echo "ERROR: could not find any nvidia-driver package in the apt archive."
