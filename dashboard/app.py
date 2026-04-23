@@ -54,6 +54,11 @@ LMS_MODELS_DIR = Path(os.environ.get("LMS_MODELS_DIR", str(Path.home() / ".lmstu
 LMS_API_PORT  = int(os.environ.get("LMS_API_PORT", "1234"))
 LMS_API_BASE  = f"http://127.0.0.1:{LMS_API_PORT}"
 
+# Extra GGUF store used by llama-server (the file baked into the systemd unit
+# lives here). Scanned alongside LM Studio's own models dir.
+EXTRA_MODELS_DIR = Path(os.environ.get("EXTRA_MODELS_DIR", str(Path.home() / "models")))
+LLAMA_SERVER_UNIT = "llama-server.service"
+
 
 class Job:
     def __init__(self) -> None:
@@ -564,18 +569,77 @@ def _lms_loaded_model() -> Optional[str]:
 
 
 def _lms_scan_models() -> list[dict[str, Any]]:
-    models = []
-    if not LMS_MODELS_DIR.exists():
-        return models
-    for p in sorted(LMS_MODELS_DIR.rglob("*.gguf")):
-        if p.name.endswith(".incomplete"):
+    """Scan both the LM Studio catalog AND the extra ~/models dir (where
+    llama-server's GGUFs live). Dedup by absolute path."""
+    seen: set[str] = set()
+    models: list[dict[str, Any]] = []
+    for root_label, root in (("lmstudio", LMS_MODELS_DIR), ("extra", EXTRA_MODELS_DIR)):
+        if not root.exists():
             continue
-        models.append({
-            "name": p.stem,
-            "rel_path": str(p.relative_to(LMS_MODELS_DIR)),
-            "size_gb": round(p.stat().st_size / (1024 ** 3), 2),
-        })
+        for p in sorted(root.rglob("*.gguf")):
+            if p.name.endswith(".incomplete"):
+                continue
+            key = str(p.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                rel = str(p.relative_to(root))
+            except ValueError:
+                rel = p.name
+            models.append({
+                "name": p.stem,
+                "rel_path": rel,
+                "abs_path": key,
+                "source": root_label,
+                "size_gb": round(p.stat().st_size / (1024 ** 3), 2),
+            })
     return models
+
+
+def _llama_server_status() -> dict[str, Any]:
+    """systemctl status for the llama-server unit, when it exists."""
+    try:
+        out = subprocess.check_output(
+            ["systemctl", "show", LLAMA_SERVER_UNIT,
+             "--property=ActiveState,SubState,MainPID,Environment,LoadState"],
+            text=True, timeout=3,
+        )
+    except Exception:
+        return {"present": False}
+    info: dict[str, Any] = {"present": True}
+    for line in out.strip().splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        info[k] = v
+    info["present"] = info.get("LoadState") not in (None, "not-found", "masked")
+    info["running"] = info.get("ActiveState") == "active"
+    # Pull MODEL= out of the unit's Environment= for display.
+    env = info.get("Environment", "") or ""
+    for tok in env.split():
+        if tok.startswith("MODEL="):
+            info["model_path"] = tok[len("MODEL="):]
+            break
+    return info
+
+
+def _detect_backend() -> str:
+    """Which model-serving backend is currently answering on LMS_API_PORT."""
+    try:
+        with urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2) as r:
+            body = r.read().decode("utf-8", errors="replace")
+    except Exception:
+        return "none"
+    srv = _llama_server_status()
+    if srv.get("running"):
+        return "llama-server"
+    if LMSTUDIO_PATH.exists():
+        return "lm-studio"
+    # API is up but we don't know which; trust fingerprints in the body.
+    if "b8893" in body or "llama.cpp" in body.lower():
+        return "llama-server"
+    return "unknown"
 
 
 def _vram_usage() -> list[dict[str, Any]]:
@@ -606,6 +670,7 @@ def _vram_usage() -> list[dict[str, Any]]:
 @app.get("/api/lms/status")
 def lms_status() -> dict[str, Any]:
     running = _lms_healthy()
+    llama = _llama_server_status()
     return {
         "installed": LMSTUDIO_PATH.exists(),
         "lms_cli": LMS_BIN.exists(),
@@ -614,6 +679,14 @@ def lms_status() -> dict[str, Any]:
         "models": _lms_scan_models(),
         "vram": _vram_usage(),
         "api_port": LMS_API_PORT,
+        # Backend reflection: which engine is actually answering, plus the
+        # systemd state of the llama-server unit when we're using it.
+        "backend": _detect_backend() if running else "none",
+        "llama_server": llama,
+        # Hot-swap is only possible with LM Studio; llama-server bakes the
+        # model into the systemd unit's Environment=MODEL=... and needs a
+        # restart (not a /api/lms/models/load call) to change models.
+        "supports_hot_swap": running and _detect_backend() != "llama-server",
     }
 
 
