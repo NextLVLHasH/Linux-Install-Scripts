@@ -31,6 +31,9 @@ RestartSec=5
 # enough for the model KV cache to be freed before escalating to SIGKILL.
 KillSignal=SIGTERM
 TimeoutStopSec=30
+# Remove memlock cap so --mlock can pin the model weights without hitting
+# the default 8 MiB RLIMIT_MEMLOCK. Harmless if --mlock is off.
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

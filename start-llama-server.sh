@@ -22,13 +22,11 @@ LLAMA_BIND="${LLAMA_BIND:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 LLAMA_BIND="${LLAMA_BIND:-127.0.0.1}"
 LLAMA_NGL="${LLAMA_NGL:-99}"
 LLAMA_THREADS="${LLAMA_THREADS:-$(nproc)}"
-# KV cache per token — *measured* on this box with flash-attn on and the
-# Vulkan backend comes in at ≈34 KB/tok for Qwen 2.5 7B, not the
-# formula's 57 KB. llama.cpp packs K/V tighter than the naive
-# 2×kv_heads×head_dim×layers×2 calculation suggests when FA is enabled.
-# Tune up (50000–65000) if you disable FA or switch to a model with
-# more KV heads.
-KV_BYTES_PER_TOKEN="${KV_BYTES_PER_TOKEN:-35000}"
+# KV cache per token is derived from the gguf metadata below (via
+# _probe_kv_per_token) so the script adapts to whatever model is loaded
+# without hand-tuning. You can still pin a value with KV_BYTES_PER_TOKEN=.
+# Fallback (if the probe fails) matches a Qwen 2.5 7B with flash-attn.
+KV_BYTES_PER_TOKEN_FALLBACK=35000
 # llama-server's non-KV overhead is ~300 MiB idle; prefill batch buffers
 # eat another chunk when LLAMA_BATCH is large. 256 fills VRAM hardest
 # without bumping into OOM at load.
@@ -66,6 +64,88 @@ if [[ ! -f "$MODEL" ]]; then
     echo "ERROR: model not found at $MODEL"
     exit 1
 fi
+
+# ── probe gguf for KV cache size per token ───────────────────────────────
+# Use llama-cli --show-metadata to dump the gguf header, then compute:
+#   bytes_per_token = 2 (K+V) × n_layers × head_count_kv × head_dim × 2 (fp16)
+# where head_dim prefers attention.key_length if present, otherwise falls
+# back to embedding_length / head_count. Halve for flash-attn on
+# backends that can share a single cache (best-effort — if unsure we
+# keep the full size and let the retry loop back off).
+_probe_kv_per_token() {
+    # Caller-supplied override wins.
+    if [[ -n "${KV_BYTES_PER_TOKEN:-}" ]]; then
+        echo "$KV_BYTES_PER_TOKEN"; return
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "$KV_BYTES_PER_TOKEN_FALLBACK"; return
+    fi
+    # Parse the gguf header directly. llama.cpp's own CLIs don't expose a
+    # stable metadata-dump flag across versions, so do it ourselves — the
+    # format is documented + simple. Prints the per-token KV size to stdout
+    # and a human summary to stderr; falls back silently to the default on
+    # any parse problem.
+    python3 - "$MODEL" "$KV_BYTES_PER_TOKEN_FALLBACK" <<'PY' 2>/dev/null
+import struct, sys
+path, fallback = sys.argv[1], int(sys.argv[2])
+
+def read_str(f):
+    (n,) = struct.unpack('<Q', f.read(8))
+    return f.read(n).decode('utf-8', errors='replace')
+
+def read_value(f, vt):
+    scalar = {0:'<B',1:'<b',2:'<H',3:'<h',4:'<I',5:'<i',6:'<f',10:'<Q',11:'<q',12:'<d'}
+    sizes  = {0:1, 1:1, 2:2, 3:2, 4:4, 5:4, 6:4, 10:8, 11:8, 12:8}
+    if vt in scalar:
+        return struct.unpack(scalar[vt], f.read(sizes[vt]))[0]
+    if vt == 7:                                    # bool
+        return bool(f.read(1)[0])
+    if vt == 8:                                    # string
+        return read_str(f)
+    if vt == 9:                                    # array
+        (at,) = struct.unpack('<I', f.read(4))
+        (n,)  = struct.unpack('<Q', f.read(8))
+        return [read_value(f, at) for _ in range(n)]
+    raise ValueError(f'unknown gguf type {vt}')
+
+try:
+    with open(path, 'rb') as f:
+        if f.read(4) != b'GGUF':
+            print(fallback); sys.exit(0)
+        struct.unpack('<I', f.read(4))             # version
+        (_, n_kv) = struct.unpack('<QQ', f.read(16))
+        kv = {}
+        for _ in range(n_kv):
+            k = read_str(f)
+            (vt,) = struct.unpack('<I', f.read(4))
+            kv[k] = read_value(f, vt)
+
+    arch   = kv.get('general.architecture', '')
+    P      = lambda s: f'{arch}.{s}'
+    layers = kv.get(P('block_count'))
+    khv    = kv.get(P('attention.head_count_kv'))
+    nh     = kv.get(P('attention.head_count'))
+    kl     = kv.get(P('attention.key_length'))
+    vl     = kv.get(P('attention.value_length'))
+    emb    = kv.get(P('embedding_length'))
+
+    if layers is None or khv is None:
+        print(fallback); sys.exit(0)
+    if kl is None and nh and emb:
+        kl = emb // nh
+    kl = kl or 128
+    vl = vl or kl
+
+    # K cache + V cache, fp16, one entry per (layer, kv_head) per token.
+    bpt = layers * khv * (kl + vl) * 2
+    print(bpt)
+    print(f'    KV from gguf: arch={arch} layers={layers} kv_heads={khv} '
+          f'key_len={kl} val_len={vl} → {bpt} B/token', file=sys.stderr)
+except Exception as e:
+    print(fallback)
+    print(f'    gguf probe failed: {e}', file=sys.stderr)
+PY
+}
 
 # ── auto-size context window ─────────────────────────────────────────────
 # Strategy:
@@ -107,6 +187,9 @@ _auto_ctx() {
 }
 
 if [[ -z "${LLAMA_CTX:-}" ]]; then
+    echo "==> Probing gguf for KV cache footprint..."
+    KV_BYTES_PER_TOKEN=$(_probe_kv_per_token)
+    export KV_BYTES_PER_TOKEN
     echo "==> Computing max context for available VRAM..."
     LLAMA_CTX=$(_auto_ctx)
 fi
