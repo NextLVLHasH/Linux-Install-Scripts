@@ -17,7 +17,8 @@ LLAMA_DIR="${LLAMA_DIR:-$USER_HOME/llama.cpp-bin/llama-b8893}"
 MODEL="${MODEL:-$USER_HOME/models/qwen25-coder-7b-q3.gguf}"
 
 _render_and_install() {
-    local name=$1 template="$SCRIPT_DIR/systemd/${name}"
+    local name=$1
+    local template="$SCRIPT_DIR/systemd/${name}"
     local target="/etc/systemd/system/${name}"
     [[ -f "$template" ]] || { echo "WARN: template $template missing — skipping"; return 1; }
     echo "==> Rendering $name (user=$USER_NAME, install=$SCRIPT_DIR)"
