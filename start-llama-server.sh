@@ -41,12 +41,14 @@ LLAMA_CTX_MAX="${LLAMA_CTX_MAX:-131072}"
 # VRAM on llama.cpp's Vulkan/CUDA backends. `auto` lets llama.cpp pick on
 # backends that can't safely enable it; `on` forces it.
 LLAMA_FLASH_ATTN="${LLAMA_FLASH_ATTN:-on}"
-# Batch sizes control prompt-prefill parallelism. Bigger = faster prefill,
-# more VRAM during prefill. 8192/2048 roughly doubles the prompt
-# throughput vs. llama-server's 2048/512 defaults on the 3060, and the
-# VRAM spike only shows up while prefill is running.
-LLAMA_BATCH="${LLAMA_BATCH:-8192}"
-LLAMA_UBATCH="${LLAMA_UBATCH:-2048}"
+# Batch sizes control prompt-prefill parallelism. Bigger = faster
+# prefill, but also a bigger compute-buffer allocation that scales
+# with batch × embedding_length × layers — so 8192/2048 that worked
+# fine for a 4B model can fail 'graph_reserve: failed to allocate
+# compute buffers' on a 7-14B. Start at 4096/1024 (still double the
+# llama-server defaults), the retry loop shrinks further on OOM.
+LLAMA_BATCH="${LLAMA_BATCH:-4096}"
+LLAMA_UBATCH="${LLAMA_UBATCH:-1024}"
 # Single-user boxes should only reserve one KV slot; default 4 would split
 # VRAM into 4 parallel sequences and leave ctx/4 per query.
 LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
@@ -248,17 +250,22 @@ EXTRA_ARGS=()
 [[ "$LLAMA_MLOCK" == "1" ]] && EXTRA_ARGS+=(--mlock)
 
 # Self-tuning launch loop: aim high, back off on early crash.
-# llama-server either (a) binds the port within ~30 s of a successful load,
-# (b) exits within ~30 s with an OOM / "failed to allocate" from the GPU
-# backend, or (c) keeps running while it builds compute graphs.
-#
-# We check (a) and (b); if the process dies before binding we halve the
-# context size and try again (down to 2048 minimum, max 4 attempts). On
-# success we `wait` on the child so systemd sees our lifecycle and
+# Two failure modes to back off from separately:
+#   - KV OOM: 'Vulkan0 KV buffer size …' followed by allocation failure
+#     → halve ctx.
+#   - Compute-buffer OOM: 'graph_reserve: failed to allocate compute
+#     buffers' → halve batch/ubatch (compute buf scales with batch).
+# We don't parse the log in-process; instead, on each failure we
+# shrink whichever is bigger, in a round-robin-ish pattern:
+#   attempt 1:  ctx ,     batch / ubatch
+#   attempt 2:  ctx ,     batch/2 / ubatch/2
+#   attempt 3:  ctx/2 ,   batch/2 / ubatch/2
+#   attempt 4:  ctx/2 ,   batch/4 / ubatch/4
+# On success we `wait` on the child so systemd sees our lifecycle and
 # SIGTERM propagates cleanly.
-_launch_with_ctx() {
-    local ctx=$1
-    echo "==> Launching llama-server with -c $ctx ..."
+_launch_once() {
+    local ctx=$1 batch=$2 ubatch=$3
+    echo "==> Launching llama-server: -c $ctx -b $batch -ub $ubatch ..."
     "$LLAMA_BIN" \
         -m "$MODEL" \
         --host "$LLAMA_BIND" \
@@ -266,45 +273,49 @@ _launch_with_ctx() {
         -c "$ctx" \
         -ngl "$LLAMA_NGL" \
         -t "$LLAMA_THREADS" \
-        -b "$LLAMA_BATCH" \
-        -ub "$LLAMA_UBATCH" \
+        -b "$batch" \
+        -ub "$ubatch" \
         -fa "$LLAMA_FLASH_ATTN" \
         --parallel "$LLAMA_PARALLEL" \
         "${EXTRA_ARGS[@]}" &
     LLAMA_PID=$!
 
-    # Give it up to 45 s to either bind the port or die.
+    # Up to 45 s for bind-or-die.
     for _ in $(seq 1 45); do
         if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${LLAMA_PORT}\$"; then
-            return 0   # bound — happy path
+            return 0
         fi
         if ! kill -0 "$LLAMA_PID" 2>/dev/null; then
-            return 1   # died before binding
+            return 1
         fi
         sleep 1
     done
-    # Timed out waiting for bind but still alive; treat as success so systemd
-    # doesn't flip-flop and we don't kill a slow-loader.
+    # Still alive but no bind yet — assume slow loader, hand off to wait.
     return 0
 }
 
 CUR_CTX="$LLAMA_CTX"
-for attempt in 1 2 3 4; do
-    if _launch_with_ctx "$CUR_CTX"; then
-        # Clean handoff: forward signals so systemd stop works as expected.
+CUR_BATCH="$LLAMA_BATCH"
+CUR_UBATCH="$LLAMA_UBATCH"
+for attempt in 1 2 3 4 5; do
+    if _launch_once "$CUR_CTX" "$CUR_BATCH" "$CUR_UBATCH"; then
         _fwd() { kill -"$1" "$LLAMA_PID" 2>/dev/null || true; wait "$LLAMA_PID"; exit $?; }
         trap '_fwd TERM' TERM
         trap '_fwd INT'  INT
         wait "$LLAMA_PID"
         exit $?
     fi
-    NEXT=$(( CUR_CTX / 2 ))
-    if (( NEXT < 2048 )); then
-        echo "ERROR: llama-server wouldn't even load at ctx=$CUR_CTX — giving up."
-        exit 1
-    fi
-    echo "==> llama-server died at ctx=$CUR_CTX (likely OOM); retrying at ctx=$NEXT"
-    CUR_CTX=$NEXT
+    case "$attempt" in
+        1)  CUR_BATCH=$(( CUR_BATCH / 2 )); CUR_UBATCH=$(( CUR_UBATCH / 2 )) ;;
+        2)  CUR_CTX=$(( CUR_CTX / 2 )) ;;
+        3)  CUR_BATCH=$(( CUR_BATCH / 2 )); CUR_UBATCH=$(( CUR_UBATCH / 2 )) ;;
+        4)  CUR_CTX=$(( CUR_CTX / 2 )) ;;
+    esac
+    # Floors — below these, llama.cpp's own minima kick in.
+    (( CUR_BATCH  <  512 )) && CUR_BATCH=512
+    (( CUR_UBATCH <  128 )) && CUR_UBATCH=128
+    (( CUR_CTX    < 2048 )) && CUR_CTX=2048
+    echo "==> Retry ${attempt}: ctx=$CUR_CTX batch=$CUR_BATCH ubatch=$CUR_UBATCH"
 done
-echo "ERROR: exhausted retry attempts."
+echo "ERROR: exhausted retry attempts — check 'journalctl -u llama-server.service'."
 exit 1
