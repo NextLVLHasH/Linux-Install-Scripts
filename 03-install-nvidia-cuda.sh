@@ -18,6 +18,33 @@ fi
 echo "==> NVIDIA GPU detected:"
 lspci | grep -i -E 'vga|3d|display' | grep -i nvidia
 
+# ── SecureBoot check ──────────────────────────────────────────────────────
+# NVIDIA's apt repo ships unsigned kernel module sources; DKMS builds them
+# locally. On SecureBoot-enabled systems the install hangs on an interactive
+# MOK-password prompt (no TTY under automation) and leaves dpkg broken.
+# Fail early with a clear message instead of wedging the box.
+if command -v mokutil >/dev/null 2>&1 && mokutil --sb-state 2>/dev/null | grep -qi "SecureBoot enabled"; then
+    cat <<'WARN'
+
+╔════════════════════════════════════════════════════════════════════╗
+║  SecureBoot is ENABLED — NVIDIA's proprietary driver cannot be     ║
+║  installed non-interactively on this system.                       ║
+║                                                                    ║
+║  NVIDIA's apt repo ships unsigned kernel modules; DKMS tries to    ║
+║  sign them during install and prompts for a MOK password. That     ║
+║  prompt can't be answered under a headless/automated install and   ║
+║  will hang the dpkg transaction.                                   ║
+║                                                                    ║
+║  FIX: reboot into BIOS/UEFI, set SecureBoot to Disabled, save &    ║
+║       exit, then re-run this script.                               ║
+║                                                                    ║
+║  (After boot, verify with: mokutil --sb-state)                     ║
+╚════════════════════════════════════════════════════════════════════╝
+
+WARN
+    exit 1
+fi
+
 # Short-circuit if the proprietary driver is already live and happy.
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     echo "==> nvidia-smi already working — driver is live:"
