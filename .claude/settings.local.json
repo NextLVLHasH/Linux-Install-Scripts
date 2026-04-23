@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile dashboard/app.py)",
+      "Bash(where python3 *)",
+      "Bash(ls /c/Python*)",
+      "Read(//c/Users/Davet/AppData/Local/Programs/**)",
+      "Bash(node -e \"const fs = require\\('fs'\\); const src = fs.readFileSync\\('dashboard/static/app.js', 'utf8'\\); try { new Function\\(src\\); console.log\\('syntax OK'\\); } catch \\(e\\) { console.log\\('SYNTAX ERROR:', e.message\\); }\")",
+      "Bash(/c/Users/Davet/AppData/Local/Microsoft/WindowsApps/python.exe --version)",
+      "Bash(node -e \"const fs = require\\('fs'\\); const src = fs.readFileSync\\('dashboard/static/app.js', 'utf8'\\); try { new Function\\(src\\); console.log\\('syntax OK, length=' + src.length\\); } catch \\(e\\) { console.log\\('SYNTAX ERROR:', e.message\\); }\")"
+    ]
+  }
+}

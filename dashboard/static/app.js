@@ -1,5 +1,20 @@
 // Dashboard frontend logic. Talks to FastAPI backend.
 
+// Tab switching — wired first via event delegation so the nav works
+// regardless of any later runtime error in this file.
+document.addEventListener('click', (e) => {
+  const btn = e.target.closest('.tab-btn');
+  if (!btn) return;
+  const target = btn.dataset.tab;
+  if (!target) return;
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  btn.classList.add('active');
+  const panel = document.querySelector(`.tab-panel[data-tab="${target}"]`);
+  if (panel) panel.classList.add('active');
+  if (target === 'lmstudio' && typeof lmsRefresh === 'function') lmsRefresh();
+});
+
 const $ = (sel) => document.querySelector(sel);
 
 const els = {
@@ -508,21 +523,6 @@ refreshState();
 openLogStream();
 openAgentStream();
 setInterval(refreshState, 5000);
-
-// ════════════════════════════════════════════════════════════
-// Tab switching
-// ════════════════════════════════════════════════════════════
-
-document.querySelectorAll('.tab-btn').forEach(btn => {
-  btn.addEventListener('click', () => {
-    const target = btn.dataset.tab;
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    document.querySelector(`.tab-panel[data-tab="${target}"]`).classList.add('active');
-    if (target === 'lmstudio') lmsRefresh();
-  });
-});
 
 // ════════════════════════════════════════════════════════════
 // LM Studio tab
