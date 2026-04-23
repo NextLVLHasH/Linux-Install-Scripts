@@ -17,7 +17,30 @@ RESUME_FILE="$STATE_DIR/resume"
 REBOOT_MARKER="$STATE_DIR/.needs-reboot"
 SERVICE_NAME="ml-stack-resume"
 LOG_DIR="${LOG_DIR:-$STATE_DIR/logs}"
+CONFIG_FILE="$STATE_DIR/config.env"
 sudo mkdir -p "$STATE_DIR" "$LOG_DIR"
+
+# Resolve the *real* user's home even if the installer was launched with sudo,
+# so paths like ~/pytorch-env don't accidentally land under /root.
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)
+: "${REAL_HOME:=$HOME}"
+
+# Export + persist the shared install paths so every child step and any later
+# standalone script (e.g. 09-start-dashboard.sh, systemd-launched or not) sees
+# the same values regardless of which user or context runs it.
+export INSTALL_DIR="$SCRIPT_DIR"
+export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
+export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
+
+sudo tee "$CONFIG_FILE" >/dev/null <<CONF
+# ml-stack install config — auto-generated, safe to source
+INSTALL_DIR=$INSTALL_DIR
+VENV_DIR=$VENV_DIR
+LMSTUDIO_DIR=$LMSTUDIO_DIR
+REAL_USER=$REAL_USER
+REAL_HOME=$REAL_HOME
+CONF
 
 # ── terminal setup ─────────────────────────────────────────────────────────
 _tput() { command tput "$@" 2>/dev/null || true; }
@@ -57,13 +80,28 @@ _cleanup() { _tput cnorm; printf '\n'; }
 trap _cleanup EXIT INT TERM
 
 # ── drawing ────────────────────────────────────────────────────────────────
+# Permille-scaled bar: `filled` is 0..1000 per total slot (i.e. done*1000 plus
+# a fractional contribution for the currently running step), `total` is the
+# step count. This lets the bar creep forward while a step runs.
 _bar() {
-    local done=$1 total=$2 w=${3:-40}
-    local n=$(( total > 0 ? w * done / total : 0 ))
+    local filled=$1 total=$2 w=${3:-40}
+    local denom=$(( total * 1000 ))
+    local n=$(( denom > 0 ? w * filled / denom : 0 ))
+    (( n < 0 )) && n=0
+    (( n > w )) && n=$w
     local s=''
     for (( i=0; i<n; i++ )); do s+='█'; done
     for (( i=n; i<w; i++ )); do s+='░'; done
     printf '%s' "$s"
+}
+
+# Fractional progress for the running step, in permille (0..999). Asymptotic
+# so it never hits 100% — the step's real completion snaps it to 1000.
+# K controls how fast the bar fills: at tick=K, fraction is ~50%.
+_running_frac() {
+    local elapsed=$1 K=${2:-300}
+    (( elapsed < 0 )) && elapsed=0
+    printf '%d' $(( 999 * elapsed / (elapsed + K) ))
 }
 
 _draw_header() {
@@ -76,14 +114,15 @@ _draw_header() {
 HEADER_ROWS=5
 
 BODY_ROWS=$(( TOTAL + 3 ))
+STEP_START_TICK=0
 _draw_body() {
-    local tick=${1:-0} done_count=0
+    local tick=${1:-0} done_count=0 running_idx=-1
 
     for i in "${!S_NAME[@]}"; do
         local sym label name="${S_NAME[$i]}"
         case "${S_STATUS[$i]}" in
             pending) sym="${DIM}○${RESET}";                                label="${DIM}${name}${RESET}" ;;
-            running) sym="${CYAN}${SPINNER[$((tick % 10))]}${RESET}";      label="${CYAN}${name}…${RESET}" ;;
+            running) sym="${CYAN}${SPINNER[$((tick % 10))]}${RESET}";      label="${CYAN}${name}…${RESET}"; running_idx=$i ;;
             done)    sym="${GREEN}✔${RESET}";                               label="${name}" ;;
             skipped) sym="${DIM}─${RESET}";                                label="${DIM}${name}  (already installed)${RESET}" ;;
             failed)  sym="${RED}✗${RESET}";                                label="${RED}${name}  (failed — see log)${RESET}" ;;
@@ -95,12 +134,18 @@ _draw_body() {
         [[ $s == done || $s == skipped ]] && (( done_count++ )) || true
     done
 
+    # Permille progress: each completed step contributes 1000, the currently
+    # running step contributes a time-based fraction (0..999).
+    local filled=$(( done_count * 1000 ))
+    if (( running_idx >= 0 )); then
+        filled=$(( filled + $(_running_frac $(( tick - STEP_START_TICK ))) ))
+    fi
     local pct=0
-    (( TOTAL > 0 )) && pct=$(( 100 * done_count / TOTAL )) || true
+    (( TOTAL > 0 )) && pct=$(( filled / (TOTAL * 10) )) || true
 
     printf '\n'
     printf "  ${CYAN}[%s]${RESET}  %3d%%  (%d / %d)\033[K\n" \
-        "$(_bar "$done_count" "$TOTAL")" "$pct" "$done_count" "$TOTAL"
+        "$(_bar "$filled" "$TOTAL")" "$pct" "$done_count" "$TOTAL"
     printf '\n'
 }
 
@@ -185,6 +230,7 @@ _run_step() {
     fi
 
     S_STATUS[$i]=running
+    STEP_START_TICK=$TICK
     _move_up "$BODY_ROWS"; _draw_body "$TICK"
 
     local xf; xf=$(mktemp)
