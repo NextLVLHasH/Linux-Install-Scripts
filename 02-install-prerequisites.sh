@@ -6,6 +6,8 @@ echo "==> Installing base tools and libraries..."
 sudo apt-get update -y
 sudo apt-get install -y \
     build-essential \
+    cmake \
+    dkms \
     ca-certificates \
     curl \
     wget \
@@ -15,7 +17,9 @@ sudo apt-get install -y \
     apt-transport-https \
     gnupg \
     lsb-release \
-    pkg-config
+    pkg-config \
+    libgomp1 \
+    "linux-headers-$(uname -r)"
 
 echo "==> Installing Python 3 and venv tooling..."
 sudo apt-get install -y \
