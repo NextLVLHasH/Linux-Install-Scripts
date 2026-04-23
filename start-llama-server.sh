@@ -129,6 +129,14 @@ try:
     vl     = kv.get(P('attention.value_length'))
     emb    = kv.get(P('embedding_length'))
 
+    # Hybrid architectures (Qwen 3.5 Gated Delta Net, Mamba/Jamba, ...)
+    # only put full attention on every Nth layer; the rest use recurrent
+    # state whose memory footprint is fixed, not per-token. If the gguf
+    # header tells us that interval, scale the attention-layer count
+    # accordingly — otherwise we over-allocate and undersize the ctx.
+    full_interval = kv.get(P('full_attention_interval'))
+    has_ssm       = any(k.startswith(f'{arch}.ssm.') for k in kv)
+
     if layers is None or khv is None:
         print(fallback); sys.exit(0)
     if kl is None and nh and emb:
@@ -136,11 +144,24 @@ try:
     kl = kl or 128
     vl = vl or kl
 
+    attn_layers = layers
+    hybrid_note = ''
+    if full_interval and full_interval > 1:
+        attn_layers = max(1, layers // full_interval)
+        hybrid_note = f' (hybrid: {attn_layers}/{layers} attn layers, interval={full_interval})'
+    elif has_ssm:
+        # SSM models with no explicit interval key — rough default: assume
+        # ~1/4 of layers are attention. Override with KV_BYTES_PER_TOKEN=
+        # if this heuristic is wrong for your model.
+        attn_layers = max(1, layers // 4)
+        hybrid_note = f' (ssm hybrid: estimated {attn_layers}/{layers} attn layers)'
+
     # K cache + V cache, fp16, one entry per (layer, kv_head) per token.
-    bpt = layers * khv * (kl + vl) * 2
+    bpt = attn_layers * khv * (kl + vl) * 2
     print(bpt)
     print(f'    KV from gguf: arch={arch} layers={layers} kv_heads={khv} '
-          f'key_len={kl} val_len={vl} → {bpt} B/token', file=sys.stderr)
+          f'key_len={kl} val_len={vl}{hybrid_note} → {bpt} B/token',
+          file=sys.stderr)
 except Exception as e:
     print(fallback)
     print(f'    gguf probe failed: {e}', file=sys.stderr)
