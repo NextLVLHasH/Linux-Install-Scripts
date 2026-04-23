@@ -2,6 +2,13 @@
 Description=LM Studio + Custom Trainer Dashboard
 After=network-online.target
 Wants=network-online.target
+# Safety net: at most 5 failed starts in 5 minutes, then systemd gives up.
+# Prevents runaway restart loops (we once hit 107 restarts) if the venv is
+# missing or a dep is busted. These keys live in [Unit] for compat with
+# older systemd — newer systemd also accepts them in [Service].
+# Run `sudo systemctl reset-failed lmstudio-dashboard.service` to retry.
+StartLimitBurst=5
+StartLimitIntervalSec=300
 
 [Service]
 Type=simple
@@ -22,11 +29,6 @@ Environment=XAUTHORITY=__HOME__/.Xauthority
 ExecStart=__INSTALL_DIR__/09-start-dashboard.sh
 Restart=on-failure
 RestartSec=5
-# Safety net: if the dashboard fails 5 times in 5 minutes, stop restarting.
-# Prevents runaway loops (we once hit 107 restarts) when the venv is missing
-# or a dep is busted. Run `systemctl reset-failed` to retry after fixing.
-StartLimitBurst=5
-StartLimitIntervalSec=300
 
 [Install]
 WantedBy=multi-user.target
