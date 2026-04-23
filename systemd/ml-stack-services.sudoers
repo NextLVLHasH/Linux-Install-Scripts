@@ -16,4 +16,13 @@ Cmnd_Alias ML_STACK_SERVICES = \
     /bin/systemctl restart lmstudio-dashboard.service, \
     /bin/systemctl reset-failed lmstudio-dashboard.service
 
-__USER__ ALL=(root) NOPASSWD: ML_STACK_SERVICES
+# Separate command so argument-matching stays strict: NOPASSWD only for
+# the exact helper path, caller still supplies the <gguf-path> argument.
+# The helper itself validates that the path ends in .gguf and lives in
+# one of a short list of trusted roots before writing the systemd
+# drop-in, so an attacker with dashboard access can only swap between
+# files that are already on disk in those roots.
+Cmnd_Alias ML_STACK_SET_MODEL = \
+    /usr/local/sbin/ml-stack-set-llama-model
+
+__USER__ ALL=(root) NOPASSWD: ML_STACK_SERVICES, ML_STACK_SET_MODEL

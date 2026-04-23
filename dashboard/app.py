@@ -800,18 +800,63 @@ class LmsLoadReq(BaseModel):
     context_length: int = 4096
 
 
+LLAMA_SET_MODEL_HELPER = "/usr/local/sbin/ml-stack-set-llama-model"
+
+
+def _resolve_model_path(rel_path: str) -> Optional[Path]:
+    """Turn a dashboard-supplied rel_path (or an absolute path) into an
+    actual file on disk, consulting both LM Studio's and the extra dir."""
+    p = Path(rel_path)
+    if p.is_absolute() and p.is_file():
+        return p
+    for root in (LMS_MODELS_DIR, EXTRA_MODELS_DIR):
+        cand = (root / rel_path).resolve()
+        if cand.is_file():
+            return cand
+    return None
+
+
 @app.post("/api/lms/models/load")
 def lms_models_load(req: LmsLoadReq) -> dict[str, Any]:
-    # llama-server bakes the model into the unit's Environment=MODEL=…
-    # Hot-swap isn't supported via `lms load` — swapping requires rewriting
-    # that env var in a drop-in override and restarting the unit.
-    if _llama_server_status().get("running") or _detect_backend() == "llama-server":
-        raise HTTPException(
-            409,
-            "llama-server is active — model is pinned by the unit. "
-            "Edit /etc/systemd/system/llama-server.service → Environment=MODEL=… "
-            "then restart the service.",
-        )
+    # ── llama-server path ────────────────────────────────────────────────
+    # Hot-swap is supported via a systemd drop-in: write
+    #   /etc/systemd/system/llama-server.service.d/model.conf
+    #     [Service]
+    #     Environment=MODEL=<abs path>
+    # then daemon-reload + restart. The write is done by a root-owned
+    # helper (ml-stack-set-llama-model) whitelisted in sudoers, so the
+    # dashboard never itself writes to /etc/systemd.
+    if _llama_server_status().get("present"):
+        abs_path = _resolve_model_path(req.rel_path)
+        if abs_path is None:
+            raise HTTPException(404, f"Model not found: {req.rel_path}")
+        if not Path(LLAMA_SET_MODEL_HELPER).exists():
+            raise HTTPException(
+                503,
+                f"Model-swap helper missing at {LLAMA_SET_MODEL_HELPER}. "
+                "Re-run ./10-install-systemd.sh to install it.",
+            )
+        try:
+            r = subprocess.run(
+                ["sudo", "-n", LLAMA_SET_MODEL_HELPER, str(abs_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+        except Exception as e:
+            raise HTTPException(500, f"swap helper failed: {e}")
+        if r.returncode != 0:
+            raise HTTPException(
+                500,
+                (r.stderr or r.stdout or "swap failed").strip()
+                or f"swap helper exited {r.returncode}",
+            )
+        return {
+            "ok": True,
+            "backend": "llama-server",
+            "action": "unit-restarted-with-new-model",
+            "model": str(abs_path),
+        }
+
+    # ── LM Studio path ───────────────────────────────────────────────────
     if not _lms_healthy():
         raise HTTPException(409, "Server not running — start it first.")
     argv = _lms_argv()

@@ -611,17 +611,18 @@ async function lmsRefresh() {
       ? `${loadedText}  ·  backend: llama-server (pinned)`
       : loadedText;
 
-    // When backend is llama-server the model is baked into the systemd
-    // unit's Environment=MODEL=... — there is no hot-swap. Disable the
-    // Load button and relabel Unload → Stop Server so the user's intent
-    // maps to what actually happens (systemctl stop llama-server.service,
-    // which frees VRAM).
+    // When backend is llama-server the model is pinned by the systemd
+    // unit's Environment=MODEL=... Swapping it works via a drop-in
+    // override written by a root helper — so Load is allowed; we just
+    // relabel the buttons so the user understands the model swap means
+    // a service restart, not a hot-reload.
     const loadBtn   = document.getElementById('btn-lms-load');
     const unloadBtn = document.getElementById('btn-lms-unload');
     if (loadBtn) {
-      loadBtn.disabled = isLlama;
+      loadBtn.disabled = false;
+      loadBtn.textContent = isLlama ? 'Swap model (restart server)' : 'Load';
       loadBtn.title = isLlama
-        ? 'Model is pinned to the llama-server unit. Edit Environment=MODEL= and restart the service to swap.'
+        ? 'Rewrites llama-server.service drop-in Environment=MODEL=<path> and restarts the unit.'
         : '';
     }
     if (unloadBtn) {
@@ -680,12 +681,20 @@ document.getElementById('btn-lms-load').addEventListener('click', async () => {
   const gpu_layers = parseInt(document.getElementById('lms-gpu-layers').value, 10);
   const context_length = parseInt(document.getElementById('lms-ctx').value, 10) || 4096;
   try {
-    await api('/api/lms/models/load', {
+    const r = await api('/api/lms/models/load', {
       method: 'POST',
       body: JSON.stringify({ rel_path, gpu_layers, context_length }),
     });
-    toast(`Loading ${rel_path}…`);
-    setTimeout(lmsRefresh, 2000);
+    if (r && r.backend === 'llama-server') {
+      toast(`Restarting llama-server with ${rel_path}…`);
+      // Unit restart + model load takes a few seconds; give it time to
+      // come back up before we refresh (otherwise the status says 'none'
+      // briefly and the UI flickers).
+      setTimeout(lmsRefresh, 6000);
+    } else {
+      toast(`Loading ${rel_path}…`);
+      setTimeout(lmsRefresh, 2000);
+    }
   } catch (e) { toast(e.message); }
 });
 

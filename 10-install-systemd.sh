@@ -36,6 +36,17 @@ _render_and_install() {
 _render_and_install "lmstudio-dashboard.service" || true
 _render_and_install "llama-server.service"       || true
 
+# ── install model-swap helper ────────────────────────────────────────────
+# Lets the dashboard change llama-server's pinned model via sudo -n by
+# pointing at a root-owned script at a stable path (rather than whatever
+# the caller says is the install dir).
+HELPER_SRC="$SCRIPT_DIR/set-llama-model.sh"
+HELPER_DEST="/usr/local/sbin/ml-stack-set-llama-model"
+if [[ -f "$HELPER_SRC" ]]; then
+    echo "==> Installing model-swap helper → $HELPER_DEST"
+    sudo install -m 0755 -o root -g root "$HELPER_SRC" "$HELPER_DEST"
+fi
+
 # ── sudoers drop-in: narrow grant so the dashboard can manage these units ──
 # Lets the dashboard's "Start / Stop / Restart / Unload" buttons work without
 # popping an interactive sudo prompt that systemd can't answer. Validated
