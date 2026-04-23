@@ -38,7 +38,18 @@ class GPUInfo:
 
 
 def detect_gpus() -> list[GPUInfo]:
-    """Return one GPUInfo per visible NVIDIA GPU (empty list on CPU-only)."""
+    """Return one GPUInfo per visible NVIDIA GPU (empty list on CPU-only).
+
+    Tries nvidia-smi first for full driver/VRAM info, then falls back to
+    torch.cuda when nvidia-smi isn't on PATH (e.g. CUDA installed but not
+    in $PATH, or driver present but toolkit path not sourced yet)."""
+    gpus = _detect_via_nvidia_smi()
+    if gpus:
+        return gpus
+    return _detect_via_torch()
+
+
+def _detect_via_nvidia_smi() -> list[GPUInfo]:
     if shutil.which("nvidia-smi") is None:
         return []
     try:
@@ -77,6 +88,25 @@ def detect_gpus() -> list[GPUInfo]:
     return gpus
 
 
+def _detect_via_torch() -> list[GPUInfo]:
+    """Fallback: query CUDA device properties via PyTorch."""
+    try:
+        import torch  # noqa: PLC0415
+        if not torch.cuda.is_available():
+            return []
+        gpus = []
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            gpus.append(GPUInfo(
+                index=i,
+                name=props.name,
+                vram_gb=round(props.total_memory / (1024 ** 3), 2),
+            ))
+        return gpus
+    except Exception:
+        return []
+
+
 # ---------- profiles ----------
 
 @dataclass
@@ -106,6 +136,17 @@ class TrainingProfile:
 # Sorted ASCENDING by per_gpu_vram_min_gb. pick_profile walks until VRAM < next tier.
 PROFILES: list[TrainingProfile] = [
     TrainingProfile(
+        name="xxs-4gb",
+        per_gpu_vram_min_gb=3.0,
+        batch_size=1, grad_accum=64,
+        max_length=256,
+        lora_r=4, lora_alpha=8,
+        use_4bit=True, gradient_checkpointing=True,
+        optim="paged_adamw_8bit",
+        max_recommended_params_b=0.5,
+        notes="<4GB tier (GTX 1650, older cards). Ultra-conservative; fine-tune tiny models only.",
+    ),
+    TrainingProfile(
         name="xs-6gb",
         per_gpu_vram_min_gb=6.0,
         batch_size=1, grad_accum=32,
@@ -114,7 +155,18 @@ PROFILES: list[TrainingProfile] = [
         use_4bit=True, gradient_checkpointing=True,
         optim="paged_adamw_8bit",
         max_recommended_params_b=1.5,
-        notes="6GB tier (e.g. GTX 1660, RTX 2060). Stick to <=1.5B params in 4-bit.",
+        notes="6GB tier (GTX 1660, RTX 2060). Stick to <=1.5B params in 4-bit.",
+    ),
+    TrainingProfile(
+        name="s-8gb",
+        per_gpu_vram_min_gb=7.0,
+        batch_size=1, grad_accum=16,
+        max_length=1024,
+        lora_r=16, lora_alpha=32,
+        use_4bit=True, gradient_checkpointing=True,
+        optim="paged_adamw_8bit",
+        max_recommended_params_b=1.5,
+        notes="8GB tier (RTX 3060 Ti, 3070, 4060 Ti). 1-1.5B params in 4-bit.",
     ),
     TrainingProfile(
         name="s-12gb",

@@ -1,46 +1,265 @@
 #!/usr/bin/env bash
-# Master installer. Runs every step in order.
-# Skip individual steps with env vars, e.g.:
+# Master installer — animated progress, background steps, auto-resume after reboot.
+#
+# First run:  ./install-all.sh
+# After reboot the systemd service (ml-stack-resume) resumes automatically.
+#
+# Skip individual steps manually:
 #   SKIP_NVIDIA=1 SKIP_SYSTEMD=1 ./install-all.sh
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
+chmod +x ./*.sh ./train.sh ./start-lmstudio.sh 2>/dev/null || true
 
-chmod +x ./*.sh ./train.sh 2>/dev/null || true
+STATE_DIR="/var/lib/ml-stack-install"
+RESUME_FILE="$STATE_DIR/resume"
+REBOOT_MARKER="$STATE_DIR/.needs-reboot"
+SERVICE_NAME="ml-stack-resume"
+LOG_DIR="${LOG_DIR:-$STATE_DIR/logs}"
+sudo mkdir -p "$STATE_DIR" "$LOG_DIR"
 
-run() {
-    local skip_var="$1"
-    local script="$2"
-    if [[ -n "${!skip_var:-}" ]]; then
-        echo "==> Skipping $script ($skip_var set)"
-        return
-    fi
-    echo ""
-    echo "============================================="
-    echo " Running $script"
-    echo "============================================="
-    "./$script"
-}
+# ── terminal setup ─────────────────────────────────────────────────────────
+_tput() { command tput "$@" 2>/dev/null || true; }
 
-run SKIP_UPDATE        01-update-system.sh
-run SKIP_PREREQS       02-install-prerequisites.sh
-run SKIP_NVIDIA        03-install-nvidia-cuda.sh
-run SKIP_PYTORCH       04-install-pytorch.sh
-run SKIP_LMSTUDIO      05-install-lmstudio.sh
-run SKIP_TRAINING      06-install-training-deps.sh
-run SKIP_DASHBOARD     08-install-dashboard.sh
-run SKIP_CYBERSEC      11-fetch-cybersec-datasets.sh
-
-if [[ -z "${SKIP_SYSTEMD:-}" ]]; then
-    run SKIP_SYSTEMD   10-install-systemd.sh
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+    CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
+    FANCY=true
+else
+    RED=''; GREEN=''; YELLOW=''; CYAN=''; BOLD=''; DIM=''; RESET=''
+    FANCY=false
 fi
 
-echo ""
-echo "================================================================"
-echo " Install complete."
-echo " Dashboard: http://$(hostname -I 2>/dev/null | awk '{print $1}'):8765"
-echo " Manual launch: ./09-start-dashboard.sh"
-echo " Manual model fetch: ./07-download-model.sh <hf-repo-id>"
-echo " For ZimaOS / CasaOS: see README, or ./install-casaos.sh"
-echo "================================================================"
+SPINNER=(⠋ ⠙ ⠹ ⠸ ⠼ ⠴ ⠦ ⠧ ⠇ ⠏)
+
+# ── step registry ──────────────────────────────────────────────────────────
+declare -a S_NAME S_SCRIPT S_SKIP S_STATUS
+
+_add() { S_NAME+=("$1"); S_SCRIPT+=("$2"); S_SKIP+=("$3"); S_STATUS+=(pending); }
+
+_add "System update"       "01-update-system.sh"           "SKIP_UPDATE"
+_add "Prerequisites"       "02-install-prerequisites.sh"   "SKIP_PREREQS"
+_add "NVIDIA / CUDA"       "03-install-nvidia-cuda.sh"     "SKIP_NVIDIA"   # index 2
+_add "PyTorch"             "04-install-pytorch.sh"         "SKIP_PYTORCH"
+_add "LM Studio"           "05-install-lmstudio.sh"        "SKIP_LMSTUDIO"
+_add "Training deps"       "06-install-training-deps.sh"   "SKIP_TRAINING"
+_add "Dashboard"           "08-install-dashboard.sh"       "SKIP_DASHBOARD"
+_add "Cybersec datasets"   "11-fetch-cybersec-datasets.sh" "SKIP_CYBERSEC"
+_add "Systemd service"     "10-install-systemd.sh"         "SKIP_SYSTEMD"
+
+TOTAL=${#S_NAME[@]}
+NVIDIA_IDX=2   # index of the NVIDIA step above
+
+# ── cleanup ────────────────────────────────────────────────────────────────
+_tput civis
+_cleanup() { _tput cnorm; printf '\n'; }
+trap _cleanup EXIT INT TERM
+
+# ── drawing ────────────────────────────────────────────────────────────────
+_bar() {
+    local done=$1 total=$2 w=${3:-40}
+    local n=$(( total > 0 ? w * done / total : 0 ))
+    local s=''
+    for (( i=0; i<n; i++ )); do s+='█'; done
+    for (( i=n; i<w; i++ )); do s+='░'; done
+    printf '%s' "$s"
+}
+
+_draw_header() {
+    printf '\n'
+    printf "${BOLD}${CYAN}  ╔══════════════════════════════════════════╗\n"
+    printf             "  ║      Linux ML Stack  ─  Installer        ║\n"
+    printf             "  ╚══════════════════════════════════════════╝${RESET}\n"
+    printf '\n'
+}
+HEADER_ROWS=5
+
+BODY_ROWS=$(( TOTAL + 3 ))
+_draw_body() {
+    local tick=${1:-0} done_count=0
+
+    for i in "${!S_NAME[@]}"; do
+        local sym label name="${S_NAME[$i]}"
+        case "${S_STATUS[$i]}" in
+            pending) sym="${DIM}○${RESET}";                                label="${DIM}${name}${RESET}" ;;
+            running) sym="${CYAN}${SPINNER[$((tick % 10))]}${RESET}";      label="${CYAN}${name}…${RESET}" ;;
+            done)    sym="${GREEN}✔${RESET}";                               label="${name}" ;;
+            skipped) sym="${DIM}─${RESET}";                                label="${DIM}${name}  (skipped)${RESET}" ;;
+            failed)  sym="${RED}✗${RESET}";                                label="${RED}${name}  (failed — see log)${RESET}" ;;
+        esac
+        printf "  %b  %b\033[K\n" "$sym" "$label"
+    done
+
+    for s in "${S_STATUS[@]}"; do
+        [[ $s == done || $s == skipped ]] && (( done_count++ )) || true
+    done
+
+    local pct=0
+    (( TOTAL > 0 )) && pct=$(( 100 * done_count / TOTAL )) || true
+
+    printf '\n'
+    printf "  ${CYAN}[%s]${RESET}  %3d%%  (%d / %d)\033[K\n" \
+        "$(_bar "$done_count" "$TOTAL")" "$pct" "$done_count" "$TOTAL"
+    printf '\n'
+}
+
+_move_up() { printf '\033[%dA' "$1"; }
+
+# ── resume helpers ─────────────────────────────────────────────────────────
+
+# Write SKIP_* vars for every completed step, plus metadata, to the resume file.
+_save_state() {
+    local next_idx=$1
+    {
+        echo "# ml-stack resume state — sourced by systemd EnvironmentFile"
+        echo "INSTALL_DIR=$SCRIPT_DIR"
+        echo "LOG_DIR=$LOG_DIR"
+        for i in "${!S_NAME[@]}"; do
+            if (( i < next_idx )); then
+                echo "${S_SKIP[$i]}=1"
+            fi
+        done
+    } | sudo tee "$RESUME_FILE" >/dev/null
+}
+
+# Create a one-shot systemd service that re-runs this script after reboot.
+_install_resume_service() {
+    sudo tee "/etc/systemd/system/${SERVICE_NAME}.service" >/dev/null <<SERVICE
+[Unit]
+Description=ML Stack Install Resume (post-driver reboot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=$RESUME_FILE
+ExecStart=$SCRIPT_DIR/install-all.sh
+ExecStartPost=/bin/bash -c 'systemctl disable ${SERVICE_NAME}.service; rm -f /etc/systemd/system/${SERVICE_NAME}.service; systemctl daemon-reload'
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable "${SERVICE_NAME}.service"
+}
+
+# ── step runners ───────────────────────────────────────────────────────────
+FAILED=()
+TICK=0
+
+_run_step() {
+    local i=$1 skip_var="${S_SKIP[$1]}"
+    local log="$LOG_DIR/${i}_${S_NAME[$i]// /_}.log"
+
+    if [[ -n "${!skip_var:-}" ]]; then
+        S_STATUS[$i]=skipped
+        _move_up "$BODY_ROWS"; _draw_body "$TICK"
+        return 0
+    fi
+
+    S_STATUS[$i]=running
+    _move_up "$BODY_ROWS"; _draw_body "$TICK"
+
+    local xf; xf=$(mktemp)
+    ( "./${S_SCRIPT[$i]}" >"$log" 2>&1; echo $? >"$xf" ) &
+    local bg=$!
+
+    while kill -0 "$bg" 2>/dev/null; do
+        (( TICK++ )) || true
+        _move_up "$BODY_ROWS"
+        _draw_body "$TICK"
+        sleep 0.1
+    done
+    wait "$bg" 2>/dev/null || true
+
+    local rc; rc=$(cat "$xf" 2>/dev/null || echo 1)
+    rm -f "$xf"
+
+    if [[ "$rc" == "0" ]]; then
+        S_STATUS[$i]=done
+    else
+        S_STATUS[$i]=failed
+        FAILED+=("${S_NAME[$i]}  →  $log")
+    fi
+
+    _move_up "$BODY_ROWS"
+    _draw_body "$TICK"
+}
+
+_plain_run() {
+    local i=$1 skip_var="${S_SKIP[$1]}"
+    local log="$LOG_DIR/${i}_${S_NAME[$i]// /_}.log"
+    if [[ -n "${!skip_var:-}" ]]; then
+        echo "-- Skipping: ${S_NAME[$i]}"
+        S_STATUS[$i]=skipped; return 0
+    fi
+    echo "-- Running:  ${S_NAME[$i]} …"
+    if "./${S_SCRIPT[$i]}" >"$log" 2>&1; then
+        S_STATUS[$i]=done;   echo "-- Done:     ${S_NAME[$i]}"
+    else
+        S_STATUS[$i]=failed; echo "-- FAILED:   ${S_NAME[$i]}  (log: $log)"
+        FAILED+=("${S_NAME[$i]}  →  $log")
+    fi
+}
+
+# ── initial paint ──────────────────────────────────────────────────────────
+if $FANCY; then
+    clear
+    _draw_header
+    _draw_body 0
+fi
+
+# ── main loop ──────────────────────────────────────────────────────────────
+for i in "${!S_NAME[@]}"; do
+
+    if $FANCY; then _run_step "$i"; else _plain_run "$i"; fi
+
+    # After the NVIDIA step: if new drivers were installed, resume after reboot
+    if (( i == NVIDIA_IDX )) && [[ "${S_STATUS[$i]}" == "done" ]] \
+        && [[ -f "$REBOOT_MARKER" ]]; then
+
+        _save_state $(( i + 1 ))
+        _install_resume_service
+        sudo rm -f "$REBOOT_MARKER"
+
+        _tput cnorm
+        printf "\n${YELLOW}${BOLD}  NVIDIA drivers installed — reboot required.${RESET}\n"
+        printf "  Remaining steps will resume automatically after reboot.\n"
+        printf "  To follow progress after reboot:\n"
+        printf "    journalctl -u %s -f\n\n" "$SERVICE_NAME"
+        printf "  Rebooting in 10 seconds… (Ctrl+C to cancel)\n"
+        sleep 10
+        sudo reboot
+    fi
+
+done
+
+# ── summary ────────────────────────────────────────────────────────────────
+_tput cnorm
+IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+if [[ ${#FAILED[@]} -eq 0 ]]; then
+    # Clean up resume state now that install is complete
+    sudo rm -f "$RESUME_FILE"
+
+    printf "\n${GREEN}${BOLD}  ✔  All steps complete!${RESET}\n\n"
+    printf "  Dashboard  →  ${CYAN}http://%s:8765${RESET}\n" "$IP"
+    printf "  Logs       →  ${DIM}%s/${RESET}\n\n" "$LOG_DIR"
+    printf "${YELLOW}  Rebooting in 10 seconds to apply any remaining kernel changes…${RESET}\n"
+    printf "  Press Ctrl+C to cancel.\n"
+    sleep 10
+    sudo reboot
+else
+    printf "\n${RED}${BOLD}  ✗  %d step(s) failed:${RESET}\n\n" "${#FAILED[@]}"
+    for f in "${FAILED[@]}"; do
+        printf "    ${RED}•${RESET}  %s\n" "$f"
+    done
+    printf "\n  Fix the errors and re-run install-all.sh.\n"
+    printf "  Set SKIP_<STEP>=1 to bypass steps that already succeeded.\n\n"
+    exit 1
+fi

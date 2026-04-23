@@ -19,6 +19,9 @@ else
     sudo apt-get install -y ubuntu-drivers-common
     sudo ubuntu-drivers autoinstall
     echo "==> NVIDIA driver installed. A reboot is required before the GPU is usable."
+    # Signal to install-all.sh that a reboot is needed before continuing
+    sudo mkdir -p /var/lib/ml-stack-install
+    sudo touch /var/lib/ml-stack-install/.needs-reboot
 fi
 
 echo "==> Installing CUDA toolkit runtime (nvidia-cuda-toolkit) from Ubuntu repos..."

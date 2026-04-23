@@ -39,4 +39,13 @@ sudo apt-get install -y \
     libgtk-3-0 \
     libasound2t64 2>/dev/null || sudo apt-get install -y libasound2
 
+echo "==> Installing virtual display + VNC (headless LM Studio → browser)..."
+# Xvfb: virtual framebuffer X server (fake display for headless machines)
+# x11vnc: VNC server that reads from the virtual display
+# novnc + websockify: HTML5 browser VNC client
+sudo apt-get install -y xvfb x11vnc
+sudo apt-get install -y novnc websockify 2>/dev/null \
+    || sudo apt-get install -y python3-websockify \
+    || echo "WARN: novnc/websockify not in apt — install manually if needed."
+
 echo "==> Prerequisites installed."

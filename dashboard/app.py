@@ -24,6 +24,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from pathlib import Path
 from typing import Any, Optional
@@ -45,6 +46,14 @@ for d in (MODELS_DIR, DATASETS_DIR, RUNS_DIR):
 
 PYTHON = sys.executable
 LMSTUDIO_PATH = Path(os.environ.get("LMSTUDIO_DIR", str(Path.home() / "LMStudio"))) / "LMStudio.AppImage"
+LMS_BIN       = Path.home() / ".lmstudio" / "bin" / "lms"
+LMS_MODELS_DIR = Path(os.environ.get("LMS_MODELS_DIR", str(Path.home() / ".lmstudio" / "models")))
+LMS_API_PORT  = int(os.environ.get("LMS_API_PORT", "1234"))
+LMS_API_BASE  = f"http://127.0.0.1:{LMS_API_PORT}"
+
+# Virtual display settings for headless LM Studio (mirrors start-lmstudio.sh defaults)
+VNC_DISPLAY = os.environ.get("VNC_DISPLAY", "99")
+NOVNC_PORT = int(os.environ.get("NOVNC_PORT", "6080"))
 
 
 class Job:
@@ -186,26 +195,33 @@ AGENT = AgentManager()
 app = FastAPI(title="LM Studio Dashboard")
 
 
+def _lmstudio_env() -> dict[str, str]:
+    """Environment for LM Studio: prefer the virtual display, fall back to real one."""
+    env = os.environ.copy()
+    # If our Xvfb virtual display is running, use it; otherwise fall back to whatever is set.
+    if not env.get("DISPLAY") or env.get("DISPLAY") == f":{VNC_DISPLAY}":
+        env["DISPLAY"] = f":{VNC_DISPLAY}"
+    return env
+
+
 def _auto_launch_lmstudio() -> None:
-    """Launch LM Studio alongside the dashboard if installed and a display is available.
-    Disable by setting AUTO_LAUNCH_LMSTUDIO=0. Headless boxes (ZimaOS/CasaOS containers)
-    are auto-detected via missing $DISPLAY and skipped."""
+    """Launch LM Studio alongside the dashboard.
+    Uses the virtual display (:VNC_DISPLAY) so it works headless.
+    Disable by setting AUTO_LAUNCH_LMSTUDIO=0."""
     if os.environ.get("AUTO_LAUNCH_LMSTUDIO", "1") == "0":
         return
     if not LMSTUDIO_PATH.exists():
         print(f"[startup] LM Studio not found at {LMSTUDIO_PATH}, skipping auto-launch.")
         return
-    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
-        print("[startup] No display server detected, skipping LM Studio auto-launch.")
-        return
     try:
         subprocess.Popen(
-            [str(LMSTUDIO_PATH)],
+            [str(LMSTUDIO_PATH), "--no-sandbox"],
+            env=_lmstudio_env(),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        print(f"[startup] Launched LM Studio: {LMSTUDIO_PATH}")
+        print(f"[startup] Launched LM Studio on DISPLAY=:{VNC_DISPLAY} (noVNC port {NOVNC_PORT})")
     except Exception as e:
         print(f"[startup] Failed to launch LM Studio: {e}")
 
@@ -316,6 +332,7 @@ def get_state() -> dict[str, Any]:
         "runs": list_runs(),
         "lmstudio_installed": LMSTUDIO_PATH.exists(),
         "lmstudio_path": str(LMSTUDIO_PATH),
+        "lmstudio_novnc_port": NOVNC_PORT,
         "gpu": _gpu_summary(),
     }
 
@@ -554,12 +571,233 @@ def launch_lmstudio() -> dict[str, Any]:
     if not LMSTUDIO_PATH.exists():
         raise HTTPException(404, f"LM Studio not found at {LMSTUDIO_PATH}")
     subprocess.Popen(
-        [str(LMSTUDIO_PATH)],
+        [str(LMSTUDIO_PATH), "--no-sandbox"],
+        env=_lmstudio_env(),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    return {"ok": True, "novnc_port": NOVNC_PORT}
+
+
+# ─────────────────────────────────────────────────────────────
+# LM Studio management
+# ─────────────────────────────────────────────────────────────
+
+_lms_server_proc: Optional[subprocess.Popen] = None
+_lms_server_lock = threading.Lock()
+
+
+def _lms_argv() -> list[str]:
+    """Best available prefix for lms commands."""
+    if LMS_BIN.exists():
+        return [str(LMS_BIN)]
+    if LMSTUDIO_PATH.exists():
+        return [str(LMSTUDIO_PATH), "--no-sandbox", "--"]
+    return []
+
+
+def _lms_healthy() -> bool:
+    try:
+        urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2)
+        return True
+    except Exception:
+        return False
+
+
+def _lms_loaded_model() -> Optional[str]:
+    try:
+        with urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2) as r:
+            data = json.loads(r.read())
+            items = data.get("data", [])
+            return items[0]["id"] if items else None
+    except Exception:
+        return None
+
+
+def _lms_scan_models() -> list[dict[str, Any]]:
+    models = []
+    if not LMS_MODELS_DIR.exists():
+        return models
+    for p in sorted(LMS_MODELS_DIR.rglob("*.gguf")):
+        if p.name.endswith(".incomplete"):
+            continue
+        models.append({
+            "name": p.stem,
+            "rel_path": str(p.relative_to(LMS_MODELS_DIR)),
+            "size_gb": round(p.stat().st_size / (1024 ** 3), 2),
+        })
+    return models
+
+
+def _vram_usage() -> list[dict[str, Any]]:
+    try:
+        out = subprocess.check_output(
+            ["nvidia-smi",
+             "--query-gpu=index,name,memory.used,memory.total",
+             "--format=csv,noheader,nounits"],
+            text=True, timeout=4,
+        )
+        result = []
+        for line in out.strip().splitlines():
+            p = [x.strip() for x in line.split(",")]
+            if len(p) >= 4:
+                used, total = float(p[2]), float(p[3])
+                result.append({
+                    "index": int(p[0]),
+                    "name": p[1],
+                    "used_mb": used,
+                    "total_mb": total,
+                    "pct": round(100 * used / total, 1) if total else 0,
+                })
+        return result
+    except Exception:
+        return []
+
+
+@app.get("/api/lms/status")
+def lms_status() -> dict[str, Any]:
+    running = _lms_healthy()
+    return {
+        "installed": LMSTUDIO_PATH.exists(),
+        "lms_cli": LMS_BIN.exists(),
+        "server_running": running,
+        "loaded_model": _lms_loaded_model() if running else None,
+        "models": _lms_scan_models(),
+        "vram": _vram_usage(),
+        "api_port": LMS_API_PORT,
+    }
+
+
+@app.get("/api/lms/vram")
+def lms_vram() -> list[dict[str, Any]]:
+    return _vram_usage()
+
+
+class LmsServerStartReq(BaseModel):
+    port: int = 1234
+    gpu_layers: int = -1
+    context_length: int = 4096
+
+
+@app.post("/api/lms/server/start")
+def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
+    global _lms_server_proc
+    with _lms_server_lock:
+        if _lms_healthy():
+            return {"ok": True, "already_running": True}
+        argv = _lms_argv()
+        if not argv:
+            raise HTTPException(503, "LM Studio not installed.")
+        cmd = argv + ["server", "start", "--port", str(req.port)]
+        _lms_server_proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return {"ok": True, "pid": _lms_server_proc.pid, "port": req.port}
+
+
+@app.post("/api/lms/server/stop")
+def lms_server_stop() -> dict[str, Any]:
+    global _lms_server_proc
+    with _lms_server_lock:
+        argv = _lms_argv()
+        if argv:
+            subprocess.run(argv + ["server", "stop"],
+                           capture_output=True, timeout=10, check=False)
+        if _lms_server_proc:
+            _lms_server_proc.terminate()
+            try:
+                _lms_server_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _lms_server_proc.kill()
+            _lms_server_proc = None
+        return {"ok": True}
+
+
+class LmsLoadReq(BaseModel):
+    rel_path: str
+    gpu_layers: int = -1
+    context_length: int = 4096
+
+
+@app.post("/api/lms/models/load")
+def lms_models_load(req: LmsLoadReq) -> dict[str, Any]:
+    if not _lms_healthy():
+        raise HTTPException(409, "Server not running — start it first.")
+    argv = _lms_argv()
+    if not argv:
+        raise HTTPException(503, "LM Studio not installed.")
+    cmd = argv + ["load", req.rel_path]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise HTTPException(500, result.stderr or "lms load failed")
     return {"ok": True}
+
+
+@app.post("/api/lms/models/unload")
+def lms_models_unload() -> dict[str, Any]:
+    argv = _lms_argv()
+    if argv:
+        subprocess.run(argv + ["unload"], capture_output=True, timeout=10, check=False)
+    return {"ok": True}
+
+
+class LmsDownloadReq(BaseModel):
+    repo_id: str
+    filename: str = ""
+    token: str = ""
+
+
+@app.post("/api/lms/models/download")
+async def lms_models_download(req: LmsDownloadReq):
+    LMS_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def _stream():
+        yield {"event": "log", "data": f"Downloading {req.repo_id} → {LMS_MODELS_DIR}"}
+        cmd = [PYTHON, str(ROOT / "download_model.py"),
+               req.repo_id, "--dest", str(LMS_MODELS_DIR)]
+        if req.filename:
+            cmd += ["--file", req.filename]
+        if req.token:
+            cmd += ["--token", req.token]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        async for line in proc.stdout:
+            t = line.decode(errors="replace").rstrip()
+            if t:
+                yield {"event": "log", "data": t}
+        await proc.wait()
+        if proc.returncode == 0:
+            yield {"event": "done", "data": "ok"}
+        else:
+            yield {"event": "error", "data": f"exit {proc.returncode}"}
+
+    return EventSourceResponse(_stream())
+
+
+@app.get("/api/lms/logs/stream")
+async def lms_logs_stream():
+    """SSE: tails the LM Studio server log while it runs."""
+    lms_log = Path.home() / ".lmstudio" / "logs" / "lms-server.log"
+
+    async def _stream():
+        pos = lms_log.stat().st_size if lms_log.exists() else 0
+        while True:
+            if lms_log.exists():
+                with lms_log.open("r", errors="replace") as f:
+                    f.seek(pos)
+                    chunk = f.read(8192)
+                    if chunk:
+                        for line in chunk.splitlines():
+                            yield {"event": "log", "data": line}
+                        pos += len(chunk.encode())
+            await asyncio.sleep(1)
+
+    return EventSourceResponse(_stream())
 
 
 @app.get("/api/logs/stream")

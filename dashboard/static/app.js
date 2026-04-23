@@ -517,3 +517,218 @@ refreshState();
 openLogStream();
 openAgentStream();
 setInterval(refreshState, 5000);
+
+// ════════════════════════════════════════════════════════════
+// Tab switching
+// ════════════════════════════════════════════════════════════
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const target = btn.dataset.tab;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelector(`.tab-panel[data-tab="${target}"]`).classList.add('active');
+    if (target === 'lmstudio') lmsRefresh();
+  });
+});
+
+// ════════════════════════════════════════════════════════════
+// LM Studio tab
+// ════════════════════════════════════════════════════════════
+
+const lms = {
+  serverChip:   document.getElementById('lms-server-chip'),
+  notInstalled: document.getElementById('lms-not-installed'),
+  loadedLabel:  document.getElementById('lms-loaded-label'),
+  modelSelect:  document.getElementById('lms-model-select'),
+  vramBars:     document.getElementById('lms-vram-bars'),
+  dlLog:        document.getElementById('lms-dl-log'),
+};
+
+function lmsSetServerChip(running) {
+  lms.serverChip.classList.remove('running', 'error', 'done');
+  if (running === null) {
+    lms.serverChip.textContent = 'checking…';
+  } else if (running) {
+    lms.serverChip.textContent = 'running';
+    lms.serverChip.classList.add('done');
+  } else {
+    lms.serverChip.textContent = 'stopped';
+    lms.serverChip.classList.add('error');
+  }
+}
+
+function lmsRenderModels(models) {
+  lms.modelSelect.innerHTML = '';
+  if (!models || !models.length) {
+    const o = document.createElement('md-select-option');
+    o.value = '';
+    const h = document.createElement('div'); h.slot = 'headline';
+    h.textContent = '— no GGUF models found —';
+    o.appendChild(h);
+    lms.modelSelect.appendChild(o);
+    return;
+  }
+  for (const m of models) {
+    const o = document.createElement('md-select-option');
+    o.value = m.rel_path;
+    const h = document.createElement('div'); h.slot = 'headline';
+    h.textContent = `${m.name}  (${m.size_gb} GB)`;
+    o.appendChild(h);
+    lms.modelSelect.appendChild(o);
+  }
+}
+
+function lmsRenderVram(gpus) {
+  if (!gpus || !gpus.length) {
+    lms.vramBars.innerHTML = '<div class="empty">No NVIDIA GPU detected or nvidia-smi not available.</div>';
+    return;
+  }
+  lms.vramBars.innerHTML = '';
+  for (const g of gpus) {
+    const usedGb  = (g.used_mb  / 1024).toFixed(1);
+    const totalGb = (g.total_mb / 1024).toFixed(1);
+    const pct = g.pct;
+    const fillClass = pct >= 90 ? 'crit' : pct >= 70 ? 'warn' : '';
+
+    const row = document.createElement('div');
+    row.className = 'vram-row';
+    row.innerHTML = `
+      <div class="vram-label">
+        <span><strong>GPU ${g.index}</strong> · ${g.name}</span>
+        <span>${usedGb} / ${totalGb} GB &nbsp;(${pct}%)</span>
+      </div>
+      <div class="vram-track">
+        <div class="vram-fill ${fillClass}" style="width:${pct}%"></div>
+      </div>`;
+    lms.vramBars.appendChild(row);
+  }
+}
+
+async function lmsRefresh() {
+  try {
+    const s = await api('/api/lms/status');
+    lms.notInstalled.hidden = s.installed;
+    lmsSetServerChip(s.server_running);
+    lms.loadedLabel.textContent = s.loaded_model
+      ? `Loaded: ${s.loaded_model}`
+      : 'No model loaded.';
+    lmsRenderModels(s.models);
+    lmsRenderVram(s.vram);
+  } catch (e) {
+    lmsSetServerChip(null);
+  }
+}
+
+async function lmsRefreshVram() {
+  try {
+    const gpus = await api('/api/lms/vram');
+    lmsRenderVram(gpus);
+  } catch {}
+}
+
+// Poll VRAM every 3 s (only wastes resources if the tab is open, acceptable)
+setInterval(() => {
+  const active = document.querySelector('.tab-panel.active');
+  if (active && active.dataset.tab === 'lmstudio') lmsRefreshVram();
+}, 3000);
+
+document.getElementById('btn-lms-start').addEventListener('click', async () => {
+  const port       = parseInt(document.getElementById('lms-port').value, 10) || 1234;
+  const gpu_layers = parseInt(document.getElementById('lms-gpu-layers').value, 10);
+  const context_length = parseInt(document.getElementById('lms-ctx').value, 10) || 4096;
+  lmsSetServerChip(null);
+  try {
+    await api('/api/lms/server/start', {
+      method: 'POST',
+      body: JSON.stringify({ port, gpu_layers, context_length }),
+    });
+    toast('LM Studio server starting…');
+    setTimeout(lmsRefresh, 2000);
+  } catch (e) { toast(e.message); lmsRefresh(); }
+});
+
+document.getElementById('btn-lms-stop').addEventListener('click', async () => {
+  try {
+    await api('/api/lms/server/stop', { method: 'POST' });
+    toast('Server stopped.');
+    lmsRefresh();
+  } catch (e) { toast(e.message); }
+});
+
+document.getElementById('btn-lms-load').addEventListener('click', async () => {
+  const rel_path = lms.modelSelect.value;
+  if (!rel_path) return toast('Select a model first.');
+  const gpu_layers = parseInt(document.getElementById('lms-gpu-layers').value, 10);
+  const context_length = parseInt(document.getElementById('lms-ctx').value, 10) || 4096;
+  try {
+    await api('/api/lms/models/load', {
+      method: 'POST',
+      body: JSON.stringify({ rel_path, gpu_layers, context_length }),
+    });
+    toast(`Loading ${rel_path}…`);
+    setTimeout(lmsRefresh, 2000);
+  } catch (e) { toast(e.message); }
+});
+
+document.getElementById('btn-lms-unload').addEventListener('click', async () => {
+  try {
+    await api('/api/lms/models/unload', { method: 'POST' });
+    toast('Model unloaded.');
+    lmsRefresh();
+  } catch (e) { toast(e.message); }
+});
+
+document.getElementById('btn-lms-download').addEventListener('click', async () => {
+  const repo_id = document.getElementById('lms-dl-repo').value.trim();
+  const filename = document.getElementById('lms-dl-file').value.trim();
+  const token   = document.getElementById('lms-dl-token').value.trim();
+  if (!repo_id) return toast('Enter a HF repo id.');
+
+  lms.dlLog.style.display = 'block';
+  lms.dlLog.textContent = '';
+
+  const es = new EventSource(
+    `/api/lms/models/download?` +
+    new URLSearchParams({ repo_id, filename, token }).toString()
+  );
+
+  // Can't POST via EventSource; use fetch + ReadableStream instead
+  es.close();
+  lms.dlLog.textContent = 'Starting download…\n';
+
+  try {
+    const res = await fetch('/api/lms/models/download', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_id, filename, token }),
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith('data:')) {
+          try {
+            const ev = JSON.parse(line.slice(5).trim());
+            if (ev.data) {
+              lms.dlLog.textContent += ev.data + '\n';
+              lms.dlLog.scrollTop = lms.dlLog.scrollHeight;
+            }
+            if (ev.event === 'done') { toast('Download complete.'); lmsRefresh(); }
+            if (ev.event === 'error') toast(`Download error: ${ev.data}`);
+          } catch {}
+        }
+      }
+    }
+  } catch (e) {
+    lms.dlLog.textContent += `\nError: ${e.message}`;
+    toast(e.message);
+  }
+});

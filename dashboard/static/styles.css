@@ -237,3 +237,68 @@ md-outlined-text-field, md-outlined-select {
 @media (prefers-color-scheme: dark) {
   .gpu-check.outlier { background: #3A2C00; }
 }
+
+/* ── Tabs ─────────────────────────────────────────────────── */
+.tab-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  padding: 0 24px;
+  background: var(--md-sys-color-surface-container);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  position: sticky;
+  top: 64px;   /* sits just below the topbar */
+  z-index: 9;
+}
+.tab-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 20px;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font: 500 14px var(--md-ref-typeface-plain);
+  color: var(--md-sys-color-on-surface-variant);
+  border-bottom: 3px solid transparent;
+  margin-bottom: -1px;
+  border-radius: 4px 4px 0 0;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.tab-btn .material-symbols-outlined { font-size: 18px; }
+.tab-btn:hover { background: var(--md-sys-color-surface-container-high); }
+.tab-btn.active {
+  color: var(--md-sys-color-primary);
+  border-bottom-color: var(--md-sys-color-primary);
+}
+
+.tab-panel { display: none; }
+.tab-panel.active { display: grid; }
+
+/* ── VRAM bars ─────────────────────────────────────────────── */
+.vram-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+}
+.vram-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+.vram-track {
+  height: 12px;
+  border-radius: 6px;
+  background: var(--md-sys-color-surface-container-high);
+  overflow: hidden;
+}
+.vram-fill {
+  height: 100%;
+  border-radius: 6px;
+  background: var(--md-sys-color-primary);
+  transition: width 0.4s ease;
+}
+.vram-fill.warn  { background: #F4B400; }
+.vram-fill.crit  { background: var(--md-sys-color-error); }

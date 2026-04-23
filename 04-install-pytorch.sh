@@ -14,11 +14,22 @@ source "$VENV_DIR/bin/activate"
 echo "==> Upgrading pip/setuptools/wheel..."
 pip install --upgrade pip setuptools wheel
 
-if lspci | grep -i -E 'vga|3d|display' | grep -qi nvidia; then
-    echo "==> Installing PyTorch with CUDA 12.1 support..."
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+# Detect NVIDIA GPU: try nvidia-smi first (reliable post-driver-install),
+# then fall back to lspci (works before drivers, reads PCI hardware).
+_has_nvidia=0
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --list-gpus 2>/dev/null | grep -qi gpu; then
+    _has_nvidia=1
+    echo "==> NVIDIA GPU confirmed via nvidia-smi."
+elif command -v lspci >/dev/null 2>&1 && lspci | grep -i -E 'vga|3d|display' | grep -qi nvidia; then
+    _has_nvidia=1
+    echo "==> NVIDIA GPU found via lspci (drivers may not be installed yet)."
+fi
+
+if [[ $_has_nvidia -eq 1 ]]; then
+    echo "==> Installing PyTorch with CUDA 12.4 support (Ampere/Ada/Hopper)..."
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 else
-    echo "==> Installing CPU-only PyTorch..."
+    echo "==> No NVIDIA GPU detected. Installing CPU-only PyTorch..."
     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 fi
 
