@@ -35,6 +35,22 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
+# Start the LM Studio HTTP server before the dashboard so the first request
+# doesn't race the server coming up. Skip silently if already running or if
+# the CLI isn't installed (dashboard handles both cases gracefully).
+LMS_BIN="$HOME/.lmstudio/bin/lms"
+if [[ -x "$LMS_BIN" ]]; then
+    if curl -sf "http://127.0.0.1:${LMS_API_PORT}/v1/models" >/dev/null 2>&1; then
+        echo "==> LM Studio server already running on :${LMS_API_PORT}"
+    else
+        echo "==> Starting LM Studio server on :${LMS_API_PORT}..."
+        "$LMS_BIN" server start --port "$LMS_API_PORT" >/dev/null 2>&1 || \
+            echo "    (lms server start failed — dashboard will still run)"
+    fi
+else
+    echo "==> LM Studio CLI not found at $LMS_BIN — skipping server start."
+fi
+
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
 echo ""
 echo "════════════════════════════════════════════════"
