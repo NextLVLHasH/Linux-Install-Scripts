@@ -120,6 +120,32 @@ else
 fi
 
 IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+
+# If something else is already on $PORT, don't crash uvicorn with an ugly
+# "address already in use" stacktrace — check first and bail out cleanly.
+# Typically this means the systemd-managed lmstudio-dashboard.service is
+# already serving the dashboard.
+if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${PORT}\$"; then
+    EXISTING_PID=$(ss -tlnp 2>/dev/null | awk -v p=":${PORT}" '$4 ~ p {print $NF}' | head -1)
+    echo ""
+    echo "════════════════════════════════════════════════"
+    echo "  Port ${PORT} already in use — not starting a second dashboard."
+    echo "  Existing listener: ${EXISTING_PID:-unknown}"
+    echo ""
+    if systemctl is-active --quiet lmstudio-dashboard.service 2>/dev/null; then
+        echo "  lmstudio-dashboard.service is running it — that's expected."
+        echo "  Open: http://${IP}:${PORT}"
+        echo "  To restart it: sudo systemctl restart lmstudio-dashboard.service"
+        echo "  To run it by hand instead:"
+        echo "    sudo systemctl stop lmstudio-dashboard.service && ./09-start-dashboard.sh"
+    else
+        echo "  Stop whatever is using the port, or set DASHBOARD_PORT=<other>."
+    fi
+    echo "════════════════════════════════════════════════"
+    echo ""
+    exit 0
+fi
+
 echo ""
 echo "════════════════════════════════════════════════"
 echo "  Dashboard  → http://${IP}:${PORT}"
