@@ -22,8 +22,12 @@ LLAMA_BIND="${LLAMA_BIND:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
 LLAMA_BIND="${LLAMA_BIND:-127.0.0.1}"
 LLAMA_NGL="${LLAMA_NGL:-99}"
 LLAMA_THREADS="${LLAMA_THREADS:-$(nproc)}"
-KV_BYTES_PER_TOKEN="${KV_BYTES_PER_TOKEN:-65536}"   # conservative for a 7B-ish model
-OVERHEAD_MB="${OVERHEAD_MB:-1024}"
+# KV cache per token ≈ 2 (K+V) × num_kv_heads × head_dim × num_layers × 2 bytes.
+# Qwen 2.5 7B: 2×4×128×28×2 = 57344 B/tok. Default tuned to that; override for
+# other architectures (e.g. MoE / 70B models use much more).
+KV_BYTES_PER_TOKEN="${KV_BYTES_PER_TOKEN:-57344}"
+# Observed ~500 MiB of non-KV overhead on this box — 768 leaves a small buffer.
+OVERHEAD_MB="${OVERHEAD_MB:-768}"
 
 if [[ ! -x "$LLAMA_BIN" ]]; then
     echo "ERROR: llama-server not found at $LLAMA_BIN"
