@@ -20,8 +20,17 @@ Environment=LLAMA_PORT=1234
 Environment=LLAMA_NGL=99
 # LLAMA_CTX left blank → auto-sized to the largest that fits in free VRAM.
 ExecStart=__INSTALL_DIR__/start-llama-server.sh
+# A `systemctl stop` sends SIGTERM, and llama-server exits 143 (128+15).
+# Without this, Restart=on-failure treats 143 as a failure and brings the
+# unit right back after an explicit stop — breaking the dashboard's Unload
+# button (VRAM appears to free, then fills again 5s later).
+SuccessExitStatus=0 143 SIGTERM
 Restart=on-failure
 RestartSec=5
+# Make sure SIGTERM is what actually goes to the process, and wait long
+# enough for the model KV cache to be freed before escalating to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
