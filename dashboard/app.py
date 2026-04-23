@@ -550,22 +550,44 @@ def _lms_argv() -> list[str]:
     return []
 
 
-def _lms_healthy() -> bool:
+def _candidate_api_bases() -> list[str]:
+    """API base URLs to probe, in preference order. llama-server binds to the
+    LAN IP (not loopback) by default, so we try that too instead of giving
+    up when 127.0.0.1 refuses."""
+    bases: list[str] = [LMS_API_BASE]
     try:
-        urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2)
-        return True
+        for ip in subprocess.check_output(["hostname", "-I"], text=True, timeout=2).split():
+            cand = f"http://{ip}:{LMS_API_PORT}"
+            if cand not in bases:
+                bases.append(cand)
     except Exception:
-        return False
+        pass
+    return bases
+
+
+def _lms_healthy() -> bool:
+    for base in _candidate_api_bases():
+        try:
+            urllib.request.urlopen(f"{base}/v1/models", timeout=2)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 def _lms_loaded_model() -> Optional[str]:
-    try:
-        with urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2) as r:
-            data = json.loads(r.read())
-            items = data.get("data", [])
-            return items[0]["id"] if items else None
-    except Exception:
-        return None
+    for base in _candidate_api_bases():
+        try:
+            with urllib.request.urlopen(f"{base}/v1/models", timeout=2) as r:
+                data = json.loads(r.read())
+                items = data.get("data", [])
+                if items:
+                    return items[0]["id"]
+                # endpoint up but model list empty — still reachable, stop trying
+                return None
+        except Exception:
+            continue
+    return None
 
 
 def _lms_scan_models() -> list[dict[str, Any]]:
@@ -626,20 +648,12 @@ def _llama_server_status() -> dict[str, Any]:
 
 def _detect_backend() -> str:
     """Which model-serving backend is currently answering on LMS_API_PORT."""
-    try:
-        with urllib.request.urlopen(f"{LMS_API_BASE}/v1/models", timeout=2) as r:
-            body = r.read().decode("utf-8", errors="replace")
-    except Exception:
-        return "none"
     srv = _llama_server_status()
     if srv.get("running"):
         return "llama-server"
-    if LMSTUDIO_PATH.exists():
-        return "lm-studio"
-    # API is up but we don't know which; trust fingerprints in the body.
-    if "b8893" in body or "llama.cpp" in body.lower():
-        return "llama-server"
-    return "unknown"
+    if not _lms_healthy():
+        return "none"
+    return "lm-studio" if LMSTUDIO_PATH.exists() else "unknown"
 
 
 def _vram_usage() -> list[dict[str, Any]]:
@@ -681,12 +695,12 @@ def lms_status() -> dict[str, Any]:
         "api_port": LMS_API_PORT,
         # Backend reflection: which engine is actually answering, plus the
         # systemd state of the llama-server unit when we're using it.
-        "backend": _detect_backend() if running else "none",
+        "backend": _detect_backend(),
         "llama_server": llama,
         # Hot-swap is only possible with LM Studio; llama-server bakes the
         # model into the systemd unit's Environment=MODEL=... and needs a
         # restart (not a /api/lms/models/load call) to change models.
-        "supports_hot_swap": running and _detect_backend() != "llama-server",
+        "supports_hot_swap": running and not llama.get("running"),
     }
 
 
