@@ -1,0 +1,17 @@
+# Allow __USER__ to start/stop/restart *only* these ml-stack systemd units
+# without a password. Lets the dashboard manage the llama-server service
+# (start / stop / restart, i.e. "unload model = stop server") without
+# shelling out to an interactive sudo. Every other sudo privilege is
+# unaffected — this is a narrow grant.
+#
+# Installed to /etc/sudoers.d/ml-stack-services by 10-install-systemd.sh
+# after a `visudo -cf` validation pass.
+Cmnd_Alias ML_STACK_SERVICES = \
+    /bin/systemctl start llama-server.service, \
+    /bin/systemctl stop llama-server.service, \
+    /bin/systemctl restart llama-server.service, \
+    /bin/systemctl start lmstudio-dashboard.service, \
+    /bin/systemctl stop lmstudio-dashboard.service, \
+    /bin/systemctl restart lmstudio-dashboard.service
+
+__USER__ ALL=(root) NOPASSWD: ML_STACK_SERVICES

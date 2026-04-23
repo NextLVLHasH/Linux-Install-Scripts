@@ -602,9 +602,35 @@ async function lmsRefresh() {
     const s = await api('/api/lms/status');
     lms.notInstalled.hidden = s.installed;
     lmsSetServerChip(s.server_running);
-    lms.loadedLabel.textContent = s.loaded_model
+
+    const isLlama = s.backend === 'llama-server';
+    const loadedText = s.loaded_model
       ? `Loaded: ${s.loaded_model}`
       : 'No model loaded.';
+    lms.loadedLabel.textContent = isLlama
+      ? `${loadedText}  ·  backend: llama-server (pinned)`
+      : loadedText;
+
+    // When backend is llama-server the model is baked into the systemd
+    // unit's Environment=MODEL=... — there is no hot-swap. Disable the
+    // Load button and relabel Unload → Stop Server so the user's intent
+    // maps to what actually happens (systemctl stop llama-server.service,
+    // which frees VRAM).
+    const loadBtn   = document.getElementById('btn-lms-load');
+    const unloadBtn = document.getElementById('btn-lms-unload');
+    if (loadBtn) {
+      loadBtn.disabled = isLlama;
+      loadBtn.title = isLlama
+        ? 'Model is pinned to the llama-server unit. Edit Environment=MODEL= and restart the service to swap.'
+        : '';
+    }
+    if (unloadBtn) {
+      unloadBtn.textContent = isLlama ? 'Stop server (free VRAM)' : 'Unload';
+      unloadBtn.title = isLlama
+        ? 'Stops llama-server.service; frees VRAM. Start Server reloads it.'
+        : '';
+    }
+
     lmsRenderModels(s.models);
     lmsRenderVram(s.vram);
   } catch (e) {
@@ -665,8 +691,17 @@ document.getElementById('btn-lms-load').addEventListener('click', async () => {
 
 document.getElementById('btn-lms-unload').addEventListener('click', async () => {
   try {
-    await api('/api/lms/models/unload', { method: 'POST' });
-    toast('Model unloaded.');
+    const r = await api('/api/lms/models/unload', { method: 'POST' });
+    // Different backends report different outcomes; reflect what actually
+    // happened instead of the previous hardcoded "Model unloaded" that made
+    // a silent no-op look successful.
+    if (r && r.backend === 'llama-server') {
+      toast('llama-server stopped — VRAM freed.');
+    } else if (r && r.still_loaded) {
+      toast(`Unload reported ok, but model still listed: ${r.still_loaded}`);
+    } else {
+      toast('Model unloaded.');
+    }
     lmsRefresh();
   } catch (e) { toast(e.message); }
 });

@@ -715,12 +715,34 @@ class LmsServerStartReq(BaseModel):
     context_length: int = 4096
 
 
+def _systemctl(action: str, unit: str) -> tuple[bool, str]:
+    """Run `sudo systemctl <action> <unit>` relying on the NOPASSWD sudoers
+    drop-in installed by 10-install-systemd.sh. Returns (ok, stderr)."""
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "systemctl", action, unit],
+            capture_output=True, text=True, timeout=15,
+        )
+        return r.returncode == 0, (r.stderr or r.stdout).strip()
+    except Exception as e:
+        return False, str(e)
+
+
 @app.post("/api/lms/server/start")
 def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
+    # llama-server path: start the systemd unit. The unit is the source of
+    # truth for bind/port/model — we don't pass request params through here.
+    if _llama_server_status().get("present"):
+        ok, err = _systemctl("start", LLAMA_SERVER_UNIT)
+        if not ok:
+            raise HTTPException(500, f"systemctl start failed: {err}")
+        return {"ok": True, "backend": "llama-server"}
+
+    # LM Studio path
     global _lms_server_proc
     with _lms_server_lock:
         if _lms_healthy():
-            return {"ok": True, "already_running": True}
+            return {"ok": True, "already_running": True, "backend": "lm-studio"}
         argv = _lms_argv()
         if not argv:
             raise HTTPException(503, "LM Studio not installed.")
@@ -729,11 +751,20 @@ def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        return {"ok": True, "pid": _lms_server_proc.pid, "port": req.port}
+        return {"ok": True, "pid": _lms_server_proc.pid, "port": req.port,
+                "backend": "lm-studio"}
 
 
 @app.post("/api/lms/server/stop")
 def lms_server_stop() -> dict[str, Any]:
+    # llama-server path: stop the systemd unit.
+    if _llama_server_status().get("present"):
+        ok, err = _systemctl("stop", LLAMA_SERVER_UNIT)
+        if not ok:
+            raise HTTPException(500, f"systemctl stop failed: {err}")
+        return {"ok": True, "backend": "llama-server"}
+
+    # LM Studio path
     global _lms_server_proc
     with _lms_server_lock:
         argv = _lms_argv()
@@ -747,7 +778,7 @@ def lms_server_stop() -> dict[str, Any]:
             except subprocess.TimeoutExpired:
                 _lms_server_proc.kill()
             _lms_server_proc = None
-        return {"ok": True}
+        return {"ok": True, "backend": "lm-studio"}
 
 
 class LmsLoadReq(BaseModel):
@@ -758,6 +789,16 @@ class LmsLoadReq(BaseModel):
 
 @app.post("/api/lms/models/load")
 def lms_models_load(req: LmsLoadReq) -> dict[str, Any]:
+    # llama-server bakes the model into the unit's Environment=MODEL=…
+    # Hot-swap isn't supported via `lms load` — swapping requires rewriting
+    # that env var in a drop-in override and restarting the unit.
+    if _llama_server_status().get("running") or _detect_backend() == "llama-server":
+        raise HTTPException(
+            409,
+            "llama-server is active — model is pinned by the unit. "
+            "Edit /etc/systemd/system/llama-server.service → Environment=MODEL=… "
+            "then restart the service.",
+        )
     if not _lms_healthy():
         raise HTTPException(409, "Server not running — start it first.")
     argv = _lms_argv()
@@ -767,15 +808,33 @@ def lms_models_load(req: LmsLoadReq) -> dict[str, Any]:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise HTTPException(500, result.stderr or "lms load failed")
-    return {"ok": True}
+    return {"ok": True, "backend": "lm-studio"}
 
 
 @app.post("/api/lms/models/unload")
 def lms_models_unload() -> dict[str, Any]:
+    # For llama-server there is no "unload the model but keep the server
+    # running" concept — the model is loaded at process start. "Unload"
+    # therefore means stop the unit, which frees VRAM.
+    if _llama_server_status().get("present"):
+        ok, err = _systemctl("stop", LLAMA_SERVER_UNIT)
+        if not ok:
+            raise HTTPException(500, f"systemctl stop failed: {err}")
+        return {"ok": True, "backend": "llama-server", "action": "stopped-unit"}
+
+    # LM Studio path: `lms unload` silently succeeds if nothing's loaded,
+    # which previously made the button look like it did nothing. Report the
+    # CLI's real state so the UI can toast accurately.
     argv = _lms_argv()
-    if argv:
-        subprocess.run(argv + ["unload"], capture_output=True, timeout=10, check=False)
-    return {"ok": True}
+    if not argv:
+        raise HTTPException(503, "No LM Studio or llama-server backend available.")
+    r = subprocess.run(argv + ["unload"], capture_output=True, text=True, timeout=10)
+    if r.returncode != 0:
+        raise HTTPException(500, (r.stderr or r.stdout or "lms unload failed").strip())
+    # After unload, confirm nothing is listed in /v1/models. If the CLI lied
+    # ("ok" but model still there), surface that.
+    still_loaded = _lms_loaded_model()
+    return {"ok": True, "backend": "lm-studio", "still_loaded": still_loaded}
 
 
 class LmsDownloadReq(BaseModel):

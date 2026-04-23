@@ -36,6 +36,26 @@ _render_and_install() {
 _render_and_install "lmstudio-dashboard.service" || true
 _render_and_install "llama-server.service"       || true
 
+# ── sudoers drop-in: narrow grant so the dashboard can manage these units ──
+# Lets the dashboard's "Start / Stop / Restart / Unload" buttons work without
+# popping an interactive sudo prompt that systemd can't answer. Validated
+# with `visudo -cf` before install so a broken template can never wedge
+# sudo system-wide.
+SUDOERS_TMPL="$SCRIPT_DIR/systemd/ml-stack-services.sudoers"
+SUDOERS_TARGET="/etc/sudoers.d/ml-stack-services"
+if [[ -f "$SUDOERS_TMPL" ]]; then
+    TMP_SUDOERS=$(mktemp)
+    sed "s|__USER__|$USER_NAME|g" "$SUDOERS_TMPL" > "$TMP_SUDOERS"
+    if sudo visudo -cf "$TMP_SUDOERS" >/dev/null 2>&1; then
+        sudo install -m 0440 -o root -g root "$TMP_SUDOERS" "$SUDOERS_TARGET"
+        echo "==> Installed sudoers drop-in: $SUDOERS_TARGET"
+    else
+        echo "WARN: sudoers template failed visudo validation — skipping."
+        sudo visudo -cf "$TMP_SUDOERS" || true
+    fi
+    rm -f "$TMP_SUDOERS"
+fi
+
 echo "==> Reloading systemd..."
 sudo systemctl daemon-reload
 
