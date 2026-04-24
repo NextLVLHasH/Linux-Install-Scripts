@@ -77,7 +77,7 @@ if [[ -r "$CONFIG_FILE" ]]; then
 fi
 
 # Resolve the *real* user's home even if the installer was launched with sudo,
-# so paths like ~/pytorch-env don't accidentally land under /root.
+# so paths like ~/LMStudio and ~/llama.cpp-bin don't accidentally land under /root.
 REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
@@ -86,7 +86,7 @@ REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}
 # standalone script (e.g. 09-start-dashboard.sh, systemd-launched or not) sees
 # the same values regardless of which user or context runs it.
 export INSTALL_DIR="$SCRIPT_DIR"
-export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
+export VENV_DIR="${VENV_DIR:-/workspace/venv}"
 export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
 export LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
 export REAL_USER REAL_HOME

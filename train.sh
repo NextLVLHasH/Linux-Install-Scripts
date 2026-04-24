@@ -18,7 +18,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 NUM_GPUS=""
 GPU_IDS=""
 EXCLUDE_SMALLEST=0

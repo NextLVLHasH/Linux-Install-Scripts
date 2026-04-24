@@ -4,7 +4,7 @@
 #  - GitHub catalog: gfek/Real-CyberSecurity-Datasets (index of public datasets)
 set -euo pipefail
 
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 DATA_DIR="$SCRIPT_DIR/data"
 CATALOG_DIR="$DATA_DIR/cybersec-catalog"

@@ -7,7 +7,7 @@
 # correct $HOME and is owned by that user.
 set -euo pipefail
 
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 
 if [[ -x "$VENV_DIR/bin/python" ]]; then
     echo "==> venv already exists at $VENV_DIR — nothing to do."

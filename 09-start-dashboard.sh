@@ -17,8 +17,8 @@ if [[ -r "$CONFIG_FILE" ]]; then
     source "$CONFIG_FILE"
 fi
 
-# Figure out the invoking user's home so ~/pytorch-env does not resolve to
-# /root when this script is started with sudo.
+# Figure out the invoking user's home so paths like ~/LMStudio or
+# ~/llama.cpp-bin don't resolve to /root when this script runs under sudo.
 REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
@@ -26,7 +26,7 @@ REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}
 # Mirror the systemd unit so running this by hand behaves like the service.
 # Values from the config or caller win.
 export INSTALL_DIR="${INSTALL_DIR:-$SCRIPT_DIR}"
-export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
+export VENV_DIR="${VENV_DIR:-/workspace/venv}"
 export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
 export LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
 export LLAMA_BIN="${LLAMA_BIN:-$LLAMA_DIR/llama-server}"

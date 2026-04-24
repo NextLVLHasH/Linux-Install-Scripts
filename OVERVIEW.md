@@ -95,7 +95,7 @@ same dashboard.
 ./install-all.sh
    → 01 update OS
    → 02 prereqs (build tools, Python, optional GUI libs only if requested)
-   → 03a create Python venv (~/pytorch-env)
+   → 03a create Python venv (/workspace/venv)
    → 08 FastAPI/uvicorn/sse-starlette
    → 03 NVIDIA driver + CUDA (skipped on CPU boxes; may reboot/resume)
    → 05 llama.cpp llama-server → ~/llama.cpp-bin/current
@@ -370,7 +370,7 @@ For real isolation: container, dedicated unprivileged user, or a VM.
 ## 7. Deployment topologies
 
 ### Bare-metal Ubuntu / ZimaOS (the default)
-- venv at `~/pytorch-env`, llama.cpp at `~/llama.cpp-bin/current/`,
+- venv at `/workspace/venv`, llama.cpp at `~/llama.cpp-bin/current/`,
   dashboard at `:8765`, and systemd units auto-start on boot.
 - `llama-server.service` serves the pinned GGUF model on `:1234`.
 
@@ -436,7 +436,7 @@ Add a case to `render_accelerate_config()` in
 | `./data/*.jsonl` | Uploaded or fetched datasets | Persistent. |
 | `./data/cybersec-catalog/` | Cloned gfek catalog | Re-pullable; safe to delete. |
 | `./runs/<name>/` | LoRA adapters, tokenizer, `training_meta.json`, tensorboard logs | Persistent. The agent loads adapters from here. |
-| `~/pytorch-env/` | Python venv | Re-creatable via step 4. |
+| `/workspace/venv/` | Python venv | Re-creatable via step 4. |
 | `~/llama.cpp-bin/current/llama-server` | Headless inference server | Rebuildable via step 5. |
 | `/etc/systemd/system/lmstudio-dashboard.service` | Boot unit | Created by step 10; `systemctl disable` to remove. |
 | Container volumes | `models / data / runs / hf-cache` | Survive container restarts/rebuilds. |

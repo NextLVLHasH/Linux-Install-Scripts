@@ -3,7 +3,7 @@
 # Picks CUDA 12.1 wheels if an NVIDIA GPU is present, otherwise CPU wheels.
 set -euo pipefail
 
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 
 # Idempotent: re-use an existing venv (e.g. one created by 03a-create-venv.sh
 # before NVIDIA/CUDA so downstream steps could populate it) instead of failing.

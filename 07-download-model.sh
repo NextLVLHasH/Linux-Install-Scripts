@@ -10,7 +10,7 @@ if [[ $# -lt 1 ]]; then
     exit 1
 fi
 
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
 # shellcheck disable=SC1091

@@ -2,7 +2,7 @@
 # Step 6: install Hugging Face / LoRA fine-tuning stack into the PyTorch venv.
 set -euo pipefail
 
-VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
+VENV_DIR="${VENV_DIR:-/workspace/venv}"
 
 if [[ ! -d "$VENV_DIR" ]]; then
     echo "ERROR: venv not found at $VENV_DIR. Run ./04-install-pytorch.sh first."

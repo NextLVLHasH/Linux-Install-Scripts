@@ -142,7 +142,7 @@ Workflow:
 CLI:
 
 ```bash
-source ~/pytorch-env/bin/activate
+source /workspace/venv/bin/activate
 python agent.py \
     --model ./models/Qwen__Qwen2.5-0.5B \
     --adapter ./runs/agent-finetune \
@@ -254,7 +254,7 @@ Three ways to get data in:
 
 | Var | Default | Used by |
 | --- | --- | --- |
-| `VENV_DIR` | `~/pytorch-env` | all venv-using scripts |
+| `VENV_DIR` | `/workspace/venv` | all venv-using scripts |
 | `LLAMA_DIR` | `~/llama.cpp-bin/current` | llama-server install/start scripts |
 | `LLAMA_BIN` | `$LLAMA_DIR/llama-server` | dashboard + start script |
 | `GGUF_MODELS_DIR` | `./models` / `~/models` | Server tab GGUF downloads |
