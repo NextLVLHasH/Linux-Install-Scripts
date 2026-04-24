@@ -421,6 +421,15 @@ for i in "${!S_NAME[@]}"; do
 
     if $FANCY; then _run_step "$i"; else _plain_run "$i"; fi
 
+    # Once the venv exists, activate it in *this* shell so every subsequent
+    # step inherits VIRTUAL_ENV + a PATH that puts $VENV_DIR/bin first. This
+    # guarantees pip/python invocations land in /workspace/venv even if a
+    # step script forgets to source activate itself.
+    if [[ -z "${VIRTUAL_ENV:-}" && -f "$VENV_DIR/bin/activate" ]]; then
+        # shellcheck disable=SC1091
+        source "$VENV_DIR/bin/activate"
+    fi
+
     # After the NVIDIA step: if new drivers were installed, resume after reboot
     if (( i == NVIDIA_IDX )) && [[ "${S_STATUS[$i]}" == "done" ]] \
         && [[ -f "$REBOOT_MARKER" ]]; then

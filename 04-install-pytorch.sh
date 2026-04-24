@@ -10,6 +10,12 @@ VENV_DIR="${VENV_DIR:-/workspace/venv}"
 if [[ -x "$VENV_DIR/bin/python" ]]; then
     echo "==> Re-using existing venv at $VENV_DIR"
 else
+    VENV_PARENT="$(dirname "$VENV_DIR")"
+    if [[ ! -d "$VENV_PARENT" ]]; then
+        echo "==> Creating parent directory $VENV_PARENT"
+        sudo mkdir -p "$VENV_PARENT"
+        sudo chown "$(id -u):$(id -g)" "$VENV_PARENT" 2>/dev/null || true
+    fi
     echo "==> Creating Python venv at: $VENV_DIR"
     python3 -m venv "$VENV_DIR"
 fi

@@ -2,9 +2,6 @@
 # Step 3a: create an empty Python venv so downstream install steps that need
 # it (dashboard, cybersec dataset fetch) can run before PyTorch is installed.
 # 04-install-pytorch.sh later populates this same venv with torch + friends.
-#
-# Runs as the invoking user — not via sudo — so the venv lives under the
-# correct $HOME and is owned by that user.
 set -euo pipefail
 
 VENV_DIR="${VENV_DIR:-/workspace/venv}"
@@ -17,6 +14,15 @@ fi
 if ! command -v python3 >/dev/null 2>&1; then
     echo "ERROR: python3 not found. Run ./02-install-prerequisites.sh first."
     exit 1
+fi
+
+# Make sure the parent dir exists and is writable. Needed on fresh
+# hosts/containers where /workspace doesn't exist yet.
+VENV_PARENT="$(dirname "$VENV_DIR")"
+if [[ ! -d "$VENV_PARENT" ]]; then
+    echo "==> Creating parent directory $VENV_PARENT"
+    sudo mkdir -p "$VENV_PARENT"
+    sudo chown "$(id -u):$(id -g)" "$VENV_PARENT" 2>/dev/null || true
 fi
 
 echo "==> Creating empty Python venv at $VENV_DIR"
