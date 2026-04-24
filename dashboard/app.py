@@ -38,6 +38,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+import auth  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import gpu_profile  # noqa: E402
@@ -48,18 +50,19 @@ for d in (MODELS_DIR, DATASETS_DIR, RUNS_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
 PYTHON = sys.executable
-LMSTUDIO_PATH = Path(os.environ.get("LMSTUDIO_DIR", str(Path.home() / "LMStudio"))) / "LMStudio.AppImage"
+LMSTUDIO_PATH = Path(os.environ.get("LMSTUDIO_DIR", "/workspace/LMStudio")) / "LMStudio.AppImage"
 LMS_BIN       = Path.home() / ".lmstudio" / "bin" / "lms"
-LLAMA_DIR = Path(os.environ.get("LLAMA_DIR", str(Path.home() / "llama.cpp-bin" / "current")))
+LLAMA_DIR = Path(os.environ.get("LLAMA_DIR", "/workspace/llama.cpp-bin/current"))
 LLAMA_BIN = Path(os.environ.get("LLAMA_BIN", str(LLAMA_DIR / "llama-server")))
-GGUF_MODELS_DIR = Path(os.environ.get("GGUF_MODELS_DIR", str(MODELS_DIR)))
+GGUF_MODELS_DIR = Path(os.environ.get("GGUF_MODELS_DIR", "/workspace/models"))
 LMS_MODELS_DIR = Path(os.environ.get("LMS_MODELS_DIR", str(Path.home() / ".lmstudio" / "models")))
 LMS_API_PORT  = int(os.environ.get("LMS_API_PORT", "1234"))
 _active_lms_api_port = LMS_API_PORT
 
-# Extra GGUF store used by llama-server on bare-metal installs. Scanned alongside
-# the dashboard's persistent models dir and LM Studio's legacy catalog.
-EXTRA_MODELS_DIR = Path(os.environ.get("EXTRA_MODELS_DIR", str(Path.home() / "models")))
+# Extra GGUF store scanned alongside the dashboard's persistent models dir
+# and LM Studio's legacy catalog. Kept under /workspace so the catalog
+# survives pod restarts.
+EXTRA_MODELS_DIR = Path(os.environ.get("EXTRA_MODELS_DIR", "/workspace/models"))
 LLAMA_SERVER_UNIT = "llama-server.service"
 
 
@@ -200,6 +203,7 @@ AGENT = AgentManager()
 
 
 app = FastAPI(title="ML Stack Dashboard")
+auth.install(app)
 
 
 # ---------- listings ----------
@@ -582,7 +586,7 @@ def _start_direct_llama(model: Optional[Path] = None, req: Optional["LmsServerSt
         if model is not None:
             env["MODEL"] = str(model)
         elif "MODEL" not in env:
-            default_model = Path.home() / "models" / "qwen25-coder-7b-q3.gguf"
+            default_model = Path("/workspace/models/qwen25-coder-7b-q3.gguf")
             if not default_model.exists():
                 raise HTTPException(
                     400,

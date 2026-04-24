@@ -25,9 +25,11 @@ fi
 USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
 USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 VENV_DIR="${VENV_DIR:-/workspace/venv}"
-LMSTUDIO_DIR="${LMSTUDIO_DIR:-$USER_HOME/LMStudio}"
-LLAMA_DIR="${LLAMA_DIR:-$USER_HOME/llama.cpp-bin/current}"
-MODEL="${MODEL:-$USER_HOME/models/qwen25-coder-7b-q3.gguf}"
+LMSTUDIO_DIR="${LMSTUDIO_DIR:-/workspace/LMStudio}"
+LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
+MODEL="${MODEL:-/workspace/models/qwen25-coder-7b-q3.gguf}"
+GGUF_MODELS_DIR="${GGUF_MODELS_DIR:-/workspace/models}"
+HF_HOME="${HF_HOME:-/workspace/hf-cache}"
 
 _render_and_install() {
     local name=$1
@@ -42,6 +44,8 @@ _render_and_install() {
         -e "s|__LMSTUDIO_DIR__|$LMSTUDIO_DIR|g" \
         -e "s|__LLAMA_DIR__|$LLAMA_DIR|g" \
         -e "s|__MODEL__|$MODEL|g" \
+        -e "s|__GGUF_MODELS_DIR__|$GGUF_MODELS_DIR|g" \
+        -e "s|__HF_HOME__|$HF_HOME|g" \
         -e "s|__HOME__|$USER_HOME|g" \
         "$template" | sudo tee "$target" >/dev/null
 }

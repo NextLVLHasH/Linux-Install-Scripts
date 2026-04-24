@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 VENV_DIR="${VENV_DIR:-/workspace/venv}"
-LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-bin/current}"
+LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
 
 if [[ -d "$VENV_DIR" ]]; then
     # shellcheck disable=SC1091

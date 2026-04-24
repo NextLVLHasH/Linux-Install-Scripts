@@ -13,7 +13,7 @@
 #   RESOLUTION     virtual screen resolution (default: 1920x1080)
 set -euo pipefail
 
-LMSTUDIO_DIR="${LMSTUDIO_DIR:-$HOME/LMStudio}"
+LMSTUDIO_DIR="${LMSTUDIO_DIR:-/workspace/LMStudio}"
 APPIMAGE="$LMSTUDIO_DIR/LMStudio.AppImage"
 
 VNC_DISPLAY="${VNC_DISPLAY:-99}"

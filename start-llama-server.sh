@@ -6,7 +6,7 @@
 #   MODEL          GGUF file to serve          (default: Qwen Q3 GGUF we downloaded)
 #   LLAMA_BIN      llama-server binary path    (default: ~/llama.cpp-bin/current/llama-server)
 #   LLAMA_PORT     API port                    (default: 1234)
-#   LLAMA_BIND     interface IP to listen on   (default: first LAN IP)
+#   LLAMA_BIND     interface IP to listen on   (default: 0.0.0.0)
 #   LLAMA_NGL      layers offloaded to GPU     (default: 99 = all)
 #   LLAMA_TENSOR_SPLIT  comma-sep per-GPU weights for multi-GPU
 #                       (default: auto, proportional to per-GPU VRAM)
@@ -25,12 +25,13 @@
 #   LLAMA_API_KEY_ROTATE=1  force a new key even if one exists on disk
 set -euo pipefail
 
-MODEL="${MODEL:-$HOME/models/qwen25-coder-7b-q3.gguf}"
-LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-bin/current}"
+MODEL="${MODEL:-/workspace/models/qwen25-coder-7b-q3.gguf}"
+LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
 LLAMA_BIN="${LLAMA_BIN:-$LLAMA_DIR/llama-server}"
 LLAMA_PORT="${LLAMA_PORT:-1234}"
-LLAMA_BIND="${LLAMA_BIND:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
-LLAMA_BIND="${LLAMA_BIND:-127.0.0.1}"
+# Bind to 0.0.0.0 so container port-mapping (Docker, RunPod, k8s) and
+# DHCP-renewed LAN IPs Just Work. Set LLAMA_BIND=<ip> to pin an interface.
+LLAMA_BIND="${LLAMA_BIND:-0.0.0.0}"
 LLAMA_NGL="${LLAMA_NGL:-99}"
 LLAMA_THREADS="${LLAMA_THREADS:-$(nproc)}"
 # KV cache per token is derived from the gguf metadata below (via
@@ -77,7 +78,7 @@ LLAMA_MLOCK="${LLAMA_MLOCK:-1}"
 # `Authorization: Bearer <key>`. We persist the generated key so a restart
 # doesn't break already-configured clients; set LLAMA_API_KEY_ROTATE=1 to
 # force a new one, or pass LLAMA_API_KEY=<value> to pin a specific key.
-LLAMA_API_KEY_FILE="${LLAMA_API_KEY_FILE:-$HOME/.cache/llama-server/api-key}"
+LLAMA_API_KEY_FILE="${LLAMA_API_KEY_FILE:-/workspace/.cache/llama-server/api-key}"
 _gen_api_key() {
     if command -v openssl >/dev/null 2>&1; then
         openssl rand -hex 32

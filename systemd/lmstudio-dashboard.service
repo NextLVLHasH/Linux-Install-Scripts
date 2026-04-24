@@ -18,14 +18,18 @@ Group=__USER__
 WorkingDirectory=__INSTALL_DIR__
 Environment=INSTALL_DIR=__INSTALL_DIR__
 Environment=AUTO_LAUNCH_LMSTUDIO=0
-# DASHBOARD_HOST intentionally unset → start-dashboard picks the current
-# LAN IP at boot. Override with an explicit IP to pin the bind.
+# DASHBOARD_HOST intentionally unset → start-dashboard defaults to 0.0.0.0
+# so container port-mapping + DHCP-renewed LAN IPs Just Work. Set
+# Environment=DASHBOARD_HOST=<ip> to pin a specific interface.
 Environment=DASHBOARD_PORT=8765
 Environment=VENV_DIR=__VENV_DIR__
 Environment=LMSTUDIO_DIR=__LMSTUDIO_DIR__
 Environment=LLAMA_DIR=__LLAMA_DIR__
 Environment=LLAMA_BIN=__LLAMA_DIR__/llama-server
-Environment=GGUF_MODELS_DIR=__HOME__/models
+Environment=GGUF_MODELS_DIR=__GGUF_MODELS_DIR__
+# HF_HOME pins the transformers/datasets cache under /workspace so
+# downloaded weights survive pod restarts (RunPod only persists /workspace).
+Environment=HF_HOME=__HF_HOME__
 ExecStart=__INSTALL_DIR__/09-start-dashboard.sh
 Restart=on-failure
 RestartSec=5

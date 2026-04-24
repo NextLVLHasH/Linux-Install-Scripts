@@ -9,8 +9,8 @@ REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
 
-LLAMA_SRC_DIR="${LLAMA_SRC_DIR:-$REAL_HOME/llama.cpp-src}"
-LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
+LLAMA_SRC_DIR="${LLAMA_SRC_DIR:-/workspace/llama.cpp-src}"
+LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
 BUILD_DIR="${BUILD_DIR:-$LLAMA_SRC_DIR/build}"
 
 _run_as_user() {
@@ -64,5 +64,5 @@ echo "==> llama-server installed:"
 "$LLAMA_DIR/llama-server" --version 2>/dev/null || true
 echo
 echo "Next:"
-echo "  1. Download a GGUF into $REAL_HOME/models or through the dashboard Server tab."
+echo "  1. Download a GGUF into /workspace/models or through the dashboard Server tab."
 echo "  2. Run ./10-install-systemd.sh to enable llama-server.service."

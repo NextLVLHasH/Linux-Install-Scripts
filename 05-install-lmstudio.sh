@@ -3,7 +3,7 @@
 # The default provider is now 05-install-llama-server.sh.
 set -euo pipefail
 
-LMSTUDIO_DIR="${LMSTUDIO_DIR:-$HOME/LMStudio}"
+LMSTUDIO_DIR="${LMSTUDIO_DIR:-/workspace/LMStudio}"
 LMSTUDIO_URL="${LMSTUDIO_URL:-https://installers.lmstudio.ai/linux/x64/0.3.9-6/LM-Studio-0.3.9-6-x64.AppImage}"
 APPIMAGE_PATH="$LMSTUDIO_DIR/LMStudio.AppImage"
 

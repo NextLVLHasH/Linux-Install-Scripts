@@ -27,18 +27,20 @@ REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}
 # Values from the config or caller win.
 export INSTALL_DIR="${INSTALL_DIR:-$SCRIPT_DIR}"
 export VENV_DIR="${VENV_DIR:-/workspace/venv}"
-export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
-export LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
+export LMSTUDIO_DIR="${LMSTUDIO_DIR:-/workspace/LMStudio}"
+export LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
 export LLAMA_BIN="${LLAMA_BIN:-$LLAMA_DIR/llama-server}"
-export GGUF_MODELS_DIR="${GGUF_MODELS_DIR:-$REAL_HOME/models}"
+export GGUF_MODELS_DIR="${GGUF_MODELS_DIR:-/workspace/models}"
+export HF_HOME="${HF_HOME:-/workspace/hf-cache}"
 export LMS_MODELS_DIR="${LMS_MODELS_DIR:-$GGUF_MODELS_DIR}"
 export LMS_API_PORT="${LMS_API_PORT:-1234}"
 export AUTO_LAUNCH_LMSTUDIO="${AUTO_LAUNCH_LMSTUDIO:-0}"
 
-# Default: bind to the current LAN IP, not 0.0.0.0. Keeps the dashboard
-# reachable from the LAN without exposing it on every interface.
-DASHBOARD_HOST_AUTO="$(hostname -I 2>/dev/null | awk '{print $1}')"
-export DASHBOARD_HOST="${DASHBOARD_HOST:-${DASHBOARD_HOST_AUTO:-127.0.0.1}}"
+# Default: bind to 0.0.0.0 so container port-mapping (Docker, RunPod, k8s)
+# and DHCP-renewed LAN IPs Just Work. On RunPod specifically, `hostname -I`
+# returns the internal bridge IP which is unreachable through the TCP proxy.
+# Pin to a specific interface by setting DASHBOARD_HOST=<ip>.
+export DASHBOARD_HOST="${DASHBOARD_HOST:-0.0.0.0}"
 export DASHBOARD_PORT="${DASHBOARD_PORT:-8765}"
 HOST="$DASHBOARD_HOST"
 PORT="$DASHBOARD_PORT"
@@ -124,7 +126,22 @@ else
     echo "    Run ./05-install-llama-server.sh, then ./10-install-systemd.sh."
 fi
 
-IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+# Pick a display URL for the "Dashboard ->" banner. Prefer an explicit bind
+# (e.g. an operator set DASHBOARD_HOST to a reachable IP). When we're on
+# 0.0.0.0, show the RunPod proxy hostname if we can detect one, else every
+# interface IP from hostname -I so the user can pick one that's reachable.
+if [[ "$HOST" != "0.0.0.0" && "$HOST" != "::" ]]; then
+    DISPLAY_URLS=("http://${HOST}:${PORT}")
+elif [[ -n "${RUNPOD_POD_ID:-}" ]]; then
+    DISPLAY_URLS=("https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net")
+else
+    DISPLAY_URLS=()
+    while read -r _ip; do
+        [[ -n "$_ip" ]] && DISPLAY_URLS+=("http://${_ip}:${PORT}")
+    done < <(hostname -I 2>/dev/null | tr ' ' '\n')
+    [[ ${#DISPLAY_URLS[@]} -eq 0 ]] && DISPLAY_URLS=("http://localhost:${PORT}")
+fi
+IP="${DISPLAY_URLS[0]#http*://}"; IP="${IP%:*}"
 
 # Port-conflict handling. Under systemd we kill any orphan uvicorn still holding
 # the port after a bad restart. When run interactively, we keep the old
@@ -172,7 +189,10 @@ fi
 
 echo ""
 echo "================================================"
-echo "  Dashboard -> http://${IP}:${PORT}"
+echo "  Dashboard bound on ${HOST}:${PORT}"
+for _url in "${DISPLAY_URLS[@]}"; do
+    echo "           ->  ${_url}"
+done
 echo "================================================"
 echo ""
 

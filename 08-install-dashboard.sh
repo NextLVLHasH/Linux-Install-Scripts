@@ -17,7 +17,9 @@ pip install --upgrade \
     "fastapi>=0.110" \
     "uvicorn[standard]>=0.30" \
     "python-multipart>=0.0.9" \
-    "sse-starlette>=2.1"
+    "sse-starlette>=2.1" \
+    "pyotp>=2.9" \
+    "qrcode>=7.4"
 
 deactivate
 echo "==> Dashboard deps installed."

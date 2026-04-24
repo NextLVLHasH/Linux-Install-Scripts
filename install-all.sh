@@ -87,8 +87,13 @@ REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}
 # the same values regardless of which user or context runs it.
 export INSTALL_DIR="$SCRIPT_DIR"
 export VENV_DIR="${VENV_DIR:-/workspace/venv}"
-export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
-export LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
+export LMSTUDIO_DIR="${LMSTUDIO_DIR:-/workspace/LMStudio}"
+export LLAMA_DIR="${LLAMA_DIR:-/workspace/llama.cpp-bin/current}"
+export GGUF_MODELS_DIR="${GGUF_MODELS_DIR:-/workspace/models}"
+# Pin Hugging Face cache under /workspace so downloaded models survive pod
+# restarts (RunPod only persists /workspace). Without this, transformers +
+# datasets default to ~/.cache/huggingface which is ephemeral.
+export HF_HOME="${HF_HOME:-/workspace/hf-cache}"
 export REAL_USER REAL_HOME
 
 # Force apt/dpkg into fully non-interactive mode so no step can hang on a
@@ -116,9 +121,55 @@ INSTALL_DIR=$INSTALL_DIR
 VENV_DIR=$VENV_DIR
 LMSTUDIO_DIR=$LMSTUDIO_DIR
 LLAMA_DIR=$LLAMA_DIR
+GGUF_MODELS_DIR=$GGUF_MODELS_DIR
+HF_HOME=$HF_HOME
 REAL_USER=$REAL_USER
 REAL_HOME=$REAL_HOME
 CONF
+
+# ── venv bootstrap (must run before any step so every pip install lands in
+# the same /workspace/venv) ───────────────────────────────────────────────
+# We need python3 + the venv stdlib module available before we can create
+# the venv itself. On a minimal image (RunPod bases, plain Ubuntu) the
+# stdlib `venv` module is shipped separately as `python3-venv`, so apt-
+# install it on demand. Everything after this point runs with the venv
+# on PATH, so downstream `pip install` targets /workspace/venv.
+if ! command -v python3 >/dev/null 2>&1; then
+    echo "==> Installing python3 (needed before the venv can be created)..."
+    sudo apt-get update -qq
+    sudo apt-get install -y python3
+fi
+if ! python3 -c "import venv" >/dev/null 2>&1; then
+    echo "==> Installing python3-venv (needed to create $VENV_DIR)..."
+    sudo apt-get update -qq
+    sudo apt-get install -y python3-venv
+fi
+
+VENV_PARENT="$(dirname "$VENV_DIR")"
+if [[ ! -d "$VENV_PARENT" ]]; then
+    echo "==> Creating parent directory $VENV_PARENT"
+    sudo mkdir -p "$VENV_PARENT"
+    sudo chown "$(id -u):$(id -g)" "$VENV_PARENT" 2>/dev/null || true
+fi
+
+# Seed the other /workspace paths we pin by default so first-run downloads
+# don't scatter half-created dirs across a read-only parent. Owned by the
+# invoking user so subsequent tools can write without sudo.
+for _p in "$GGUF_MODELS_DIR" "$HF_HOME" "$LLAMA_DIR" "$LMSTUDIO_DIR" /workspace/.cache/llama-server; do
+    if [[ ! -d "$_p" ]]; then
+        sudo mkdir -p "$_p"
+        sudo chown "$(id -u):$(id -g)" "$_p" 2>/dev/null || true
+    fi
+done
+
+if [[ ! -x "$VENV_DIR/bin/python" ]]; then
+    echo "==> Creating venv at $VENV_DIR"
+    python3 -m venv "$VENV_DIR"
+fi
+
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+python -m pip install --quiet --upgrade pip setuptools wheel
 
 # ── terminal setup ─────────────────────────────────────────────────────────
 _tput() { command tput "$@" 2>/dev/null || true; }

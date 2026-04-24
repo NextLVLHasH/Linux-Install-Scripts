@@ -15,8 +15,9 @@ Environment=MODEL=__MODEL__
 Environment=LLAMA_DIR=__LLAMA_DIR__
 Environment=LLAMA_BIN=__LLAMA_DIR__/llama-server
 Environment=LLAMA_PORT=1234
-# LLAMA_BIND left blank so start-llama-server.sh picks the current LAN IP at
-# boot — makes DHCP-renewed addresses Just Work.
+# LLAMA_BIND left blank → start-llama-server.sh defaults to 0.0.0.0 so
+# container port-mapping + DHCP-renewed addresses Just Work. Pin a specific
+# interface with Environment=LLAMA_BIND=<ip>.
 Environment=LLAMA_NGL=99
 # LLAMA_CTX left blank → auto-sized to the largest that fits in free VRAM.
 ExecStart=__INSTALL_DIR__/start-llama-server.sh
