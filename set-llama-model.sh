@@ -34,12 +34,15 @@ if [[ ! -f "$MODEL" ]]; then
 fi
 case "$MODEL" in
     /home/*/models/*.gguf) ;;
+    /home/*/models/*/*.gguf) ;;
     /home/*/.lmstudio/models/*) ;;
     /root/models/*.gguf) ;;
+    /root/models/*/*.gguf) ;;
     /var/lib/ml-stack-install/models/*.gguf) ;;
+    /var/lib/ml-stack-install/models/*/*.gguf) ;;
     *)
         echo "refusing model outside trusted roots: $MODEL" >&2
-        echo "  allowed: /home/<u>/models/*.gguf, /home/<u>/.lmstudio/models/*.gguf" >&2
+        echo "  allowed: /home/<u>/models/**/*.gguf, /home/<u>/.lmstudio/models/*" >&2
         exit 67
         ;;
 esac

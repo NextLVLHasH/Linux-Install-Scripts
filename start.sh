@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
-# Launches LM Studio and opens a shell with the PyTorch venv active.
+# Convenience launcher for a headless box: activate the venv and start the dashboard.
 set -euo pipefail
 
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 VENV_DIR="${VENV_DIR:-$HOME/pytorch-env}"
-LMSTUDIO_DIR="${LMSTUDIO_DIR:-$HOME/LMStudio}"
-APPIMAGE_PATH="$LMSTUDIO_DIR/LMStudio.AppImage"
+LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-bin/current}"
 
-if [[ ! -x "$APPIMAGE_PATH" ]]; then
-    echo "ERROR: LM Studio not found at $APPIMAGE_PATH"
-    echo "       Run ./05-install-lmstudio.sh first."
-    exit 1
-fi
-
-if [[ ! -d "$VENV_DIR" ]]; then
-    echo "WARN: PyTorch venv not found at $VENV_DIR — skipping activation."
-else
+if [[ -d "$VENV_DIR" ]]; then
     # shellcheck disable=SC1091
     source "$VENV_DIR/bin/activate"
-    echo "==> PyTorch venv active: $VENV_DIR"
+    echo "==> Python venv active: $VENV_DIR"
+else
+    echo "WARN: venv not found at $VENV_DIR; dashboard script may bootstrap it."
 fi
 
-echo "==> Launching LM Studio..."
-nohup "$APPIMAGE_PATH" >/dev/null 2>&1 &
-disown
-echo "    PID: $!"
-echo "    LM Studio is starting in the background."
+if [[ -x "$LLAMA_DIR/llama-server" ]]; then
+    echo "==> llama-server available: $LLAMA_DIR/llama-server"
+else
+    echo "WARN: llama-server not found. Run ./05-install-llama-server.sh."
+fi
+
+exec "$SCRIPT_DIR/09-start-dashboard.sh"

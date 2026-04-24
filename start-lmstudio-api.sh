@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Clean-restart the LM Studio OpenAI-compatible API using only the `lms` CLI.
+# Legacy optional: clean-restart the LM Studio OpenAI-compatible API using only the `lms` CLI.
+# The default headless provider is start-llama-server.sh.
 # No GUI, no Xvfb — just the command-line interface.
 #
 # Env knobs:

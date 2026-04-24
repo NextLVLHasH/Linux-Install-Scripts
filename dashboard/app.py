@@ -1,4 +1,4 @@
-"""FastAPI backend for the LM Studio + Custom Trainer dashboard.
+"""FastAPI backend for the llama-server + custom trainer dashboard.
 
 Endpoints:
   GET  /api/state            current job + listings
@@ -12,9 +12,9 @@ Endpoints:
   GET  /api/logs/stream      SSE log stream of current/last job
   GET  /                     dashboard UI
 
-LM Studio is controlled headlessly through /api/lms/* (uses the `lms` CLI
-and the LM Studio HTTP server on :1234). The dashboard does not launch the
-LM Studio GUI — if you want the GUI, run ./start-lmstudio.sh separately.
+The model-server controls live under the legacy /api/lms/* route prefix for
+front-end compatibility. The preferred backend is llama.cpp's headless
+llama-server on :1234; LM Studio remains a best-effort legacy fallback.
 """
 from __future__ import annotations
 
@@ -50,12 +50,15 @@ for d in (MODELS_DIR, DATASETS_DIR, RUNS_DIR):
 PYTHON = sys.executable
 LMSTUDIO_PATH = Path(os.environ.get("LMSTUDIO_DIR", str(Path.home() / "LMStudio"))) / "LMStudio.AppImage"
 LMS_BIN       = Path.home() / ".lmstudio" / "bin" / "lms"
+LLAMA_DIR = Path(os.environ.get("LLAMA_DIR", str(Path.home() / "llama.cpp-bin" / "current")))
+LLAMA_BIN = Path(os.environ.get("LLAMA_BIN", str(LLAMA_DIR / "llama-server")))
+GGUF_MODELS_DIR = Path(os.environ.get("GGUF_MODELS_DIR", str(MODELS_DIR)))
 LMS_MODELS_DIR = Path(os.environ.get("LMS_MODELS_DIR", str(Path.home() / ".lmstudio" / "models")))
 LMS_API_PORT  = int(os.environ.get("LMS_API_PORT", "1234"))
-LMS_API_BASE  = f"http://127.0.0.1:{LMS_API_PORT}"
+_active_lms_api_port = LMS_API_PORT
 
-# Extra GGUF store used by llama-server (the file baked into the systemd unit
-# lives here). Scanned alongside LM Studio's own models dir.
+# Extra GGUF store used by llama-server on bare-metal installs. Scanned alongside
+# the dashboard's persistent models dir and LM Studio's legacy catalog.
 EXTRA_MODELS_DIR = Path(os.environ.get("EXTRA_MODELS_DIR", str(Path.home() / "models")))
 LLAMA_SERVER_UNIT = "llama-server.service"
 
@@ -196,7 +199,7 @@ class AgentManager:
 AGENT = AgentManager()
 
 
-app = FastAPI(title="LM Studio Dashboard")
+app = FastAPI(title="ML Stack Dashboard")
 
 
 # ---------- listings ----------
@@ -300,6 +303,8 @@ def get_state() -> dict[str, Any]:
         "runs": list_runs(),
         "lmstudio_installed": LMSTUDIO_PATH.exists(),
         "lmstudio_path": str(LMSTUDIO_PATH),
+        "llama_server_installed": LLAMA_BIN.exists() or _llama_server_status().get("present", False),
+        "llama_server_path": str(LLAMA_BIN),
         "gpu": _gpu_summary(),
     }
 
@@ -534,11 +539,13 @@ async def agent_stream():
 
 
 # ─────────────────────────────────────────────────────────────
-# LM Studio management
+# Model server management (legacy route prefix: /api/lms)
 # ─────────────────────────────────────────────────────────────
 
 _lms_server_proc: Optional[subprocess.Popen] = None
 _lms_server_lock = threading.Lock()
+_llama_server_proc: Optional[subprocess.Popen] = None
+_llama_server_lock = threading.Lock()
 
 
 def _lms_argv() -> list[str]:
@@ -550,14 +557,74 @@ def _lms_argv() -> list[str]:
     return []
 
 
+def _model_server_available() -> bool:
+    return bool(_llama_server_status().get("present")) or LLAMA_BIN.exists() or LMSTUDIO_PATH.exists() or LMS_BIN.exists()
+
+
+def _start_direct_llama(model: Optional[Path] = None, req: Optional["LmsServerStartReq"] = None) -> dict[str, Any]:
+    """Start llama-server without systemd. Used in Docker and fresh manual runs."""
+    global _llama_server_proc, _active_lms_api_port
+    if not LLAMA_BIN.exists():
+        raise HTTPException(503, f"llama-server not found at {LLAMA_BIN}. Run ./05-install-llama-server.sh.")
+    with _llama_server_lock:
+        if _lms_healthy():
+            return {"ok": True, "already_running": True, "backend": "llama-server-direct"}
+        env = {**os.environ}
+        env["LLAMA_DIR"] = str(LLAMA_DIR)
+        env["LLAMA_BIN"] = str(LLAMA_BIN)
+        _active_lms_api_port = req.port if req else LMS_API_PORT
+        env["LLAMA_PORT"] = str(_active_lms_api_port)
+        if req:
+            if req.gpu_layers != -1:
+                env["LLAMA_NGL"] = str(req.gpu_layers)
+            if req.context_length:
+                env["LLAMA_CTX"] = str(req.context_length)
+        if model is not None:
+            env["MODEL"] = str(model)
+        elif "MODEL" not in env:
+            default_model = Path.home() / "models" / "qwen25-coder-7b-q3.gguf"
+            if not default_model.exists():
+                raise HTTPException(
+                    400,
+                    "No default GGUF model is configured. Download/select a GGUF model and click Load.",
+                )
+        log_path = RUNS_DIR / "llama-server.log"
+        with log_path.open("a", encoding="utf-8") as log:
+            _llama_server_proc = subprocess.Popen(
+                [str(ROOT / "start-llama-server.sh")],
+                cwd=str(ROOT),
+                env=env,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        return {"ok": True, "pid": _llama_server_proc.pid, "backend": "llama-server-direct"}
+
+
+def _stop_direct_llama() -> bool:
+    global _llama_server_proc
+    with _llama_server_lock:
+        proc = _llama_server_proc
+        if not proc:
+            return False
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        _llama_server_proc = None
+        return True
+
+
 def _candidate_api_bases() -> list[str]:
     """API base URLs to probe, in preference order. llama-server binds to the
     LAN IP (not loopback) by default, so we try that too instead of giving
     up when 127.0.0.1 refuses."""
-    bases: list[str] = [LMS_API_BASE]
+    bases: list[str] = [f"http://127.0.0.1:{_active_lms_api_port}"]
     try:
         for ip in subprocess.check_output(["hostname", "-I"], text=True, timeout=2).split():
-            cand = f"http://{ip}:{LMS_API_PORT}"
+            cand = f"http://{ip}:{_active_lms_api_port}"
             if cand not in bases:
                 bases.append(cand)
     except Exception:
@@ -591,11 +658,15 @@ def _lms_loaded_model() -> Optional[str]:
 
 
 def _lms_scan_models() -> list[dict[str, Any]]:
-    """Scan both the LM Studio catalog AND the extra ~/models dir (where
-    llama-server's GGUFs live). Dedup by absolute path."""
+    """Scan GGUF stores for llama-server, plus LM Studio's legacy catalog."""
     seen: set[str] = set()
     models: list[dict[str, Any]] = []
-    for root_label, root in (("lmstudio", LMS_MODELS_DIR), ("extra", EXTRA_MODELS_DIR)):
+    roots = [
+        ("dashboard", GGUF_MODELS_DIR),
+        ("home", EXTRA_MODELS_DIR),
+        ("lmstudio", LMS_MODELS_DIR),
+    ]
+    for root_label, root in roots:
         if not root.exists():
             continue
         for p in sorted(root.rglob("*.gguf")):
@@ -651,8 +722,12 @@ def _detect_backend() -> str:
     srv = _llama_server_status()
     if srv.get("running"):
         return "llama-server"
+    if _llama_server_proc is not None and _llama_server_proc.poll() is None:
+        return "llama-server-direct"
     if not _lms_healthy():
         return "none"
+    if LLAMA_BIN.exists() and not LMSTUDIO_PATH.exists():
+        return "llama-server-direct"
     return "lm-studio" if LMSTUDIO_PATH.exists() else "unknown"
 
 
@@ -686,13 +761,15 @@ def lms_status() -> dict[str, Any]:
     running = _lms_healthy()
     llama = _llama_server_status()
     return {
-        "installed": LMSTUDIO_PATH.exists(),
+        "installed": _model_server_available(),
         "lms_cli": LMS_BIN.exists(),
+        "llama_bin": LLAMA_BIN.exists(),
+        "llama_bin_path": str(LLAMA_BIN),
         "server_running": running,
         "loaded_model": _lms_loaded_model() if running else None,
         "models": _lms_scan_models(),
         "vram": _vram_usage(),
-        "api_port": LMS_API_PORT,
+        "api_port": _active_lms_api_port,
         # Backend reflection: which engine is actually answering, plus the
         # systemd state of the llama-server unit when we're using it.
         "backend": _detect_backend(),
@@ -700,7 +777,7 @@ def lms_status() -> dict[str, Any]:
         # Hot-swap is only possible with LM Studio; llama-server bakes the
         # model into the systemd unit's Environment=MODEL=... and needs a
         # restart (not a /api/lms/models/load call) to change models.
-        "supports_hot_swap": running and not llama.get("running"),
+        "supports_hot_swap": running and _detect_backend() == "lm-studio",
     }
 
 
@@ -730,9 +807,11 @@ def _systemctl(action: str, unit: str) -> tuple[bool, str]:
 
 @app.post("/api/lms/server/start")
 def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
+    global _lms_server_proc, _active_lms_api_port
     # llama-server path: start the systemd unit. The unit is the source of
     # truth for bind/port/model — we don't pass request params through here.
     if _llama_server_status().get("present"):
+        _active_lms_api_port = LMS_API_PORT
         # If the unit is in "failed" state (e.g. because the user clicked
         # Start/Stop/Start fast enough to trip StartLimitBurst=5), systemd
         # refuses to start it until the failure counter is cleared. Clear
@@ -751,8 +830,10 @@ def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
             raise HTTPException(500, f"systemctl start failed: {err}")
         return {"ok": True, "backend": "llama-server"}
 
+    if LLAMA_BIN.exists():
+        return _start_direct_llama(req=req)
+
     # LM Studio path
-    global _lms_server_proc
     with _lms_server_lock:
         if _lms_healthy():
             return {"ok": True, "already_running": True, "backend": "lm-studio"}
@@ -760,6 +841,7 @@ def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
         if not argv:
             raise HTTPException(503, "LM Studio not installed.")
         cmd = argv + ["server", "start", "--port", str(req.port)]
+        _active_lms_api_port = req.port
         _lms_server_proc = subprocess.Popen(
             cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
@@ -770,15 +852,20 @@ def lms_server_start(req: LmsServerStartReq) -> dict[str, Any]:
 
 @app.post("/api/lms/server/stop")
 def lms_server_stop() -> dict[str, Any]:
+    global _lms_server_proc, _active_lms_api_port
     # llama-server path: stop the systemd unit.
     if _llama_server_status().get("present"):
         ok, err = _systemctl("stop", LLAMA_SERVER_UNIT)
         if not ok:
             raise HTTPException(500, f"systemctl stop failed: {err}")
+        _active_lms_api_port = LMS_API_PORT
         return {"ok": True, "backend": "llama-server"}
 
+    if _stop_direct_llama():
+        _active_lms_api_port = LMS_API_PORT
+        return {"ok": True, "backend": "llama-server-direct"}
+
     # LM Studio path
-    global _lms_server_proc
     with _lms_server_lock:
         argv = _lms_argv()
         if argv:
@@ -791,6 +878,7 @@ def lms_server_stop() -> dict[str, Any]:
             except subprocess.TimeoutExpired:
                 _lms_server_proc.kill()
             _lms_server_proc = None
+        _active_lms_api_port = LMS_API_PORT
         return {"ok": True, "backend": "lm-studio"}
 
 
@@ -805,11 +893,11 @@ LLAMA_SET_MODEL_HELPER = "/usr/local/sbin/ml-stack-set-llama-model"
 
 def _resolve_model_path(rel_path: str) -> Optional[Path]:
     """Turn a dashboard-supplied rel_path (or an absolute path) into an
-    actual file on disk, consulting both LM Studio's and the extra dir."""
+    actual file on disk, consulting dashboard, home, and legacy LM Studio stores."""
     p = Path(rel_path)
     if p.is_absolute() and p.is_file():
         return p
-    for root in (LMS_MODELS_DIR, EXTRA_MODELS_DIR):
+    for root in (GGUF_MODELS_DIR, EXTRA_MODELS_DIR, LMS_MODELS_DIR):
         cand = (root / rel_path).resolve()
         if cand.is_file():
             return cand
@@ -856,6 +944,21 @@ def lms_models_load(req: LmsLoadReq) -> dict[str, Any]:
             "model": str(abs_path),
         }
 
+    if LLAMA_BIN.exists():
+        abs_path = _resolve_model_path(req.rel_path)
+        if abs_path is None:
+            raise HTTPException(404, f"Model not found: {req.rel_path}")
+        _stop_direct_llama()
+        return {
+            **_start_direct_llama(model=abs_path, req=LmsServerStartReq(
+                port=_active_lms_api_port,
+                gpu_layers=req.gpu_layers,
+                context_length=req.context_length,
+            )),
+            "action": "direct-process-restarted-with-new-model",
+            "model": str(abs_path),
+        }
+
     # ── LM Studio path ───────────────────────────────────────────────────
     if not _lms_healthy():
         raise HTTPException(409, "Server not running — start it first.")
@@ -880,6 +983,9 @@ def lms_models_unload() -> dict[str, Any]:
             raise HTTPException(500, f"systemctl stop failed: {err}")
         return {"ok": True, "backend": "llama-server", "action": "stopped-unit"}
 
+    if _stop_direct_llama():
+        return {"ok": True, "backend": "llama-server-direct", "action": "stopped-process"}
+
     # LM Studio path: `lms unload` silently succeeds if nothing's loaded,
     # which previously made the button look like it did nothing. Report the
     # CLI's real state so the UI can toast accurately.
@@ -903,12 +1009,12 @@ class LmsDownloadReq(BaseModel):
 
 @app.post("/api/lms/models/download")
 async def lms_models_download(req: LmsDownloadReq):
-    LMS_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    GGUF_MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
     async def _stream():
-        yield {"event": "log", "data": f"Downloading {req.repo_id} → {LMS_MODELS_DIR}"}
+        yield {"event": "log", "data": f"Downloading {req.repo_id} → {GGUF_MODELS_DIR}"}
         cmd = [PYTHON, str(ROOT / "download_model.py"),
-               req.repo_id, "--dest", str(LMS_MODELS_DIR)]
+               req.repo_id, "--dest", str(GGUF_MODELS_DIR)]
         if req.filename:
             cmd += ["--file", req.filename]
         if req.token:
@@ -933,14 +1039,16 @@ async def lms_models_download(req: LmsDownloadReq):
 
 @app.get("/api/lms/logs/stream")
 async def lms_logs_stream():
-    """SSE: tails the LM Studio server log while it runs."""
+    """SSE: tails the model-server log while it runs."""
+    llama_log = RUNS_DIR / "llama-server.log"
     lms_log = Path.home() / ".lmstudio" / "logs" / "lms-server.log"
+    log_path = llama_log if llama_log.exists() or LLAMA_BIN.exists() else lms_log
 
     async def _stream():
-        pos = lms_log.stat().st_size if lms_log.exists() else 0
+        pos = log_path.stat().st_size if log_path.exists() else 0
         while True:
-            if lms_log.exists():
-                with lms_log.open("r", errors="replace") as f:
+            if log_path.exists():
+                with log_path.open("r", errors="replace") as f:
                     f.seek(pos)
                     chunk = f.read(8192)
                     if chunk:

@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 cd "$SCRIPT_DIR"
-chmod +x ./*.sh ./train.sh ./start-lmstudio.sh 2>/dev/null || true
+chmod +x ./*.sh ./train.sh ./start-llama-server.sh ./set-llama-model.sh 2>/dev/null || true
 
 STATE_DIR="/var/lib/ml-stack-install"
 RESUME_FILE="$STATE_DIR/resume"
@@ -58,6 +58,7 @@ REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}
 export INSTALL_DIR="$SCRIPT_DIR"
 export VENV_DIR="${VENV_DIR:-$REAL_HOME/pytorch-env}"
 export LMSTUDIO_DIR="${LMSTUDIO_DIR:-$REAL_HOME/LMStudio}"
+export LLAMA_DIR="${LLAMA_DIR:-$REAL_HOME/llama.cpp-bin/current}"
 export REAL_USER REAL_HOME
 
 # Force apt/dpkg into fully non-interactive mode so no step can hang on a
@@ -84,6 +85,7 @@ sudo tee "$CONFIG_FILE" >/dev/null <<CONF
 INSTALL_DIR=$INSTALL_DIR
 VENV_DIR=$VENV_DIR
 LMSTUDIO_DIR=$LMSTUDIO_DIR
+LLAMA_DIR=$LLAMA_DIR
 REAL_USER=$REAL_USER
 REAL_HOME=$REAL_HOME
 CONF
@@ -122,7 +124,7 @@ _chk_prereqs() {
         >/dev/null 2>&1
 }
 _chk_venv()      { [[ -x "$VENV_DIR/bin/python" ]]; }
-_chk_lmstudio()  { [[ -f "$LMSTUDIO_DIR/LMStudio.AppImage" ]]; }
+_chk_llama_server() { [[ -x "$LLAMA_DIR/llama-server" ]]; }
 _chk_dashboard() {
     [[ -x "$VENV_DIR/bin/python" ]] && \
         "$VENV_DIR/bin/python" -c "import uvicorn, fastapi" >/dev/null 2>&1
@@ -141,24 +143,21 @@ _chk_training_deps() {
         "$VENV_DIR/bin/python" -c "import transformers, peft, trl" >/dev/null 2>&1
 }
 
-# Ordered so everything that doesn't need a GPU or PyTorch runs first.
-# The venv is created empty at index 2 so downstream steps (dashboard,
-# cybersec) can populate it. NVIDIA/CUDA is deliberately near the end so
-# the mid-install reboot doesn't interrupt work that can proceed without
-# the GPU. PyTorch + training deps go last so they pick up CUDA.
+# Ordered so the headless llama-server provider is built after CUDA is present
+# on GPU hosts, then systemd is installed after all service targets exist.
 _add "System update"       "01-update-system.sh"           "SKIP_UPDATE"     ""                    # 0
 _add "Prerequisites"       "02-install-prerequisites.sh"   "SKIP_PREREQS"    "_chk_prereqs"        # 1
 _add "Create venv"         "03a-create-venv.sh"            "SKIP_VENV"       "_chk_venv"           # 2
-_add "LM Studio"           "05-install-lmstudio.sh"        "SKIP_LMSTUDIO"   "_chk_lmstudio"       # 3
-_add "Dashboard"           "08-install-dashboard.sh"       "SKIP_DASHBOARD"  "_chk_dashboard"      # 4
-_add "Cybersec datasets"   "11-fetch-cybersec-datasets.sh" "SKIP_CYBERSEC"   "_chk_cybersec"       # 5
-_add "Systemd service"     "10-install-systemd.sh"         "SKIP_SYSTEMD"    "_chk_systemd"        # 6
-_add "NVIDIA / CUDA"       "03-install-nvidia-cuda.sh"     "SKIP_NVIDIA"     "_chk_nvidia"         # 7 (reboot trigger)
-_add "PyTorch"             "04-install-pytorch.sh"         "SKIP_PYTORCH"    "_chk_pytorch"        # 8
-_add "Training deps"       "06-install-training-deps.sh"   "SKIP_TRAINING"   "_chk_training_deps"  # 9
+_add "Dashboard"           "08-install-dashboard.sh"       "SKIP_DASHBOARD"  "_chk_dashboard"      # 3
+_add "NVIDIA / CUDA"       "03-install-nvidia-cuda.sh"     "SKIP_NVIDIA"     "_chk_nvidia"         # 4 (reboot trigger)
+_add "llama-server"        "05-install-llama-server.sh"    "SKIP_LLAMA"      ""                    # 5
+_add "PyTorch"             "04-install-pytorch.sh"         "SKIP_PYTORCH"    "_chk_pytorch"        # 6
+_add "Training deps"       "06-install-training-deps.sh"   "SKIP_TRAINING"   "_chk_training_deps"  # 7
+_add "Cybersec datasets"   "11-fetch-cybersec-datasets.sh" "SKIP_CYBERSEC"   "_chk_cybersec"       # 8 (needs HF datasets from training deps)
+_add "Systemd service"     "10-install-systemd.sh"         "SKIP_SYSTEMD"    "_chk_systemd"        # 9
 
 TOTAL=${#S_NAME[@]}
-NVIDIA_IDX=7   # index of the NVIDIA step above — triggers the reboot check
+NVIDIA_IDX=4   # index of the NVIDIA step above — triggers the reboot check
 
 # ── cleanup ────────────────────────────────────────────────────────────────
 _tput civis

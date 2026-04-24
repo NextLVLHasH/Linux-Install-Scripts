@@ -525,7 +525,7 @@ openAgentStream();
 setInterval(refreshState, 5000);
 
 // ════════════════════════════════════════════════════════════
-// LM Studio tab
+// Model Server tab
 // ════════════════════════════════════════════════════════════
 
 const lms = {
@@ -603,12 +603,12 @@ async function lmsRefresh() {
     lms.notInstalled.hidden = s.installed;
     lmsSetServerChip(s.server_running);
 
-    const isLlama = s.backend === 'llama-server';
+    const isLlama = s.backend === 'llama-server' || s.backend === 'llama-server-direct';
     const loadedText = s.loaded_model
       ? `Loaded: ${s.loaded_model}`
       : 'No model loaded.';
     lms.loadedLabel.textContent = isLlama
-      ? `${loadedText}  ·  backend: llama-server (pinned)`
+      ? `${loadedText}  ·  backend: ${s.backend === 'llama-server-direct' ? 'llama-server (direct)' : 'llama-server (systemd)'}`
       : loadedText;
 
     // When backend is llama-server the model is pinned by the systemd
@@ -618,11 +618,16 @@ async function lmsRefresh() {
     // a service restart, not a hot-reload.
     const loadBtn   = document.getElementById('btn-lms-load');
     const unloadBtn = document.getElementById('btn-lms-unload');
+    const directLlama = s.backend === 'llama-server-direct';
     if (loadBtn) {
       loadBtn.disabled = false;
-      loadBtn.textContent = isLlama ? 'Swap model (restart server)' : 'Load';
+      loadBtn.textContent = isLlama
+        ? (directLlama ? 'Load model (restart process)' : 'Swap model (restart service)')
+        : 'Load';
       loadBtn.title = isLlama
-        ? 'Rewrites llama-server.service drop-in Environment=MODEL=<path> and restarts the unit.'
+        ? (directLlama
+          ? 'Restarts the dashboard-managed llama-server process with MODEL=<path>.'
+          : 'Rewrites llama-server.service drop-in Environment=MODEL=<path> and restarts the unit.')
         : '';
     }
     if (unloadBtn) {
@@ -646,7 +651,7 @@ async function lmsRefreshVram() {
   } catch {}
 }
 
-// Live auto-refresh: while the LM Studio tab is visible, poll the full
+// Live auto-refresh: while the Server tab is visible, poll the full
 // status every 2.5 s so loaded model, backend, server state, and the VRAM
 // chart all move together. When the tab isn't active we skip the call so
 // we don't burn the network / GPU query bandwidth for a view nobody's
@@ -684,7 +689,7 @@ document.getElementById('btn-lms-start').addEventListener('click', async () => {
       method: 'POST',
       body: JSON.stringify({ port, gpu_layers, context_length }),
     });
-    toast('LM Studio server starting…');
+    toast('Model server starting…');
     setTimeout(lmsRefresh, 2000);
   } catch (e) { toast(e.message); lmsRefresh(); }
 });
@@ -707,7 +712,7 @@ document.getElementById('btn-lms-load').addEventListener('click', async () => {
       method: 'POST',
       body: JSON.stringify({ rel_path, gpu_layers, context_length }),
     });
-    if (r && r.backend === 'llama-server') {
+    if (r && (r.backend === 'llama-server' || r.backend === 'llama-server-direct')) {
       toast(`Restarting llama-server with ${rel_path}…`);
       // Unit restart + model load takes a few seconds; give it time to
       // come back up before we refresh (otherwise the status says 'none'
@@ -726,7 +731,7 @@ document.getElementById('btn-lms-unload').addEventListener('click', async () => 
     // Different backends report different outcomes; reflect what actually
     // happened instead of the previous hardcoded "Model unloaded" that made
     // a silent no-op look successful.
-    if (r && r.backend === 'llama-server') {
+    if (r && (r.backend === 'llama-server' || r.backend === 'llama-server-direct')) {
       toast('llama-server stopped — VRAM freed.');
     } else if (r && r.still_loaded) {
       toast(`Unload reported ok, but model still listed: ${r.still_loaded}`);

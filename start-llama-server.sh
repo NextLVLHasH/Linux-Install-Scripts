@@ -4,7 +4,7 @@
 #
 # Env knobs (all optional):
 #   MODEL          GGUF file to serve          (default: Qwen Q3 GGUF we downloaded)
-#   LLAMA_BIN      llama-server binary path    (default: ~/llama.cpp-bin/llama-b8893/llama-server)
+#   LLAMA_BIN      llama-server binary path    (default: ~/llama.cpp-bin/current/llama-server)
 #   LLAMA_PORT     API port                    (default: 1234)
 #   LLAMA_BIND     interface IP to listen on   (default: first LAN IP)
 #   LLAMA_NGL      layers offloaded to GPU     (default: 99 = all)
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 MODEL="${MODEL:-$HOME/models/qwen25-coder-7b-q3.gguf}"
-LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-bin/llama-b8893}"
+LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp-bin/current}"
 LLAMA_BIN="${LLAMA_BIN:-$LLAMA_DIR/llama-server}"
 LLAMA_PORT="${LLAMA_PORT:-1234}"
 LLAMA_BIND="${LLAMA_BIND:-$(hostname -I 2>/dev/null | awk '{print $1}')}"

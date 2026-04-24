@@ -10,7 +10,7 @@
 
 services:
   trainer-dashboard:
-    image: lmstudio-trainer-dashboard:latest
+    image: ml-stack-trainer-dashboard:latest
     build:
       context: .
       dockerfile: dashboard/Dockerfile
@@ -18,10 +18,16 @@ services:
     restart: unless-stopped
     ports:
       - "8765:8765"
+      - "1234:1234"
     environment:
-      AUTO_LAUNCH_LMSTUDIO: "0"   # headless container — no LM Studio GUI
+      AUTO_LAUNCH_LMSTUDIO: "0"   # headless container; llama-server is the provider
       DASHBOARD_HOST: "0.0.0.0"
       DASHBOARD_PORT: "8765"
+      LMS_API_PORT: "1234"
+      LLAMA_BIND: "0.0.0.0"
+      LLAMA_DIR: "/opt/llama.cpp-bin"
+      LLAMA_BIN: "/opt/llama.cpp-bin/llama-server"
+      GGUF_MODELS_DIR: "/app/models"
       HF_HOME: "/app/hf-cache"
     volumes:
       - models:/app/models
@@ -49,8 +55,8 @@ services:
     labels:
       # CasaOS metadata (shows up in the CasaOS dashboard)
       casaos.icon: "https://cdn-icons-png.flaticon.com/512/8055/8055598.png"
-      casaos.name: "LM Trainer"
-      casaos.title: "LM Studio Trainer"
+      casaos.name: "ML Trainer"
+      casaos.title: "ML Stack Trainer"
       casaos.category: "AI"
       casaos.port_map: "8765"
 

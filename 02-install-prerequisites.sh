@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Step 2: install common build tools, Python, and AppImage runtime deps.
+# Step 2: install common build tools and Python.
 set -euo pipefail
 
 echo "==> Installing base tools and libraries..."
@@ -28,28 +28,25 @@ sudo apt-get install -y \
     python3-venv \
     python3-dev
 
-echo "==> Installing AppImage runtime dependencies (needed by LM Studio)..."
-# libfuse2 is required by AppImage on Ubuntu 22.04+
-sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
-
-# GUI libs typically required by Electron-based AppImages.
-sudo apt-get install -y \
-    libnss3 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libgbm1 \
-    libgtk-3-0 \
-    libasound2t64 2>/dev/null || sudo apt-get install -y libasound2
-
-echo "==> Installing virtual display + VNC (headless LM Studio → browser)..."
-# Xvfb: virtual framebuffer X server (fake display for headless machines)
-# x11vnc: VNC server that reads from the virtual display
-# novnc + websockify: HTML5 browser VNC client
-sudo apt-get install -y xvfb x11vnc
-sudo apt-get install -y novnc websockify 2>/dev/null \
-    || sudo apt-get install -y python3-websockify \
-    || echo "WARN: novnc/websockify not in apt — install manually if needed."
+if [[ "${INSTALL_LMSTUDIO_GUI:-0}" == "1" ]]; then
+    echo "==> Installing optional AppImage + VNC deps for LM Studio GUI..."
+    sudo apt-get install -y libfuse2 || sudo apt-get install -y libfuse2t64
+    sudo apt-get install -y \
+        libnss3 \
+        libatk1.0-0 \
+        libatk-bridge2.0-0 \
+        libcups2 \
+        libdrm2 \
+        libgbm1 \
+        libgtk-3-0 \
+        libasound2t64 2>/dev/null || sudo apt-get install -y libasound2
+    sudo apt-get install -y xvfb x11vnc
+    sudo apt-get install -y novnc websockify 2>/dev/null \
+        || sudo apt-get install -y python3-websockify \
+        || echo "WARN: novnc/websockify not in apt; install manually if needed."
+else
+    echo "==> Skipping LM Studio GUI/Xvfb deps (headless default uses llama-server)."
+    echo "    Set INSTALL_LMSTUDIO_GUI=1 if you intentionally want the optional GUI stack."
+fi
 
 echo "==> Prerequisites installed."

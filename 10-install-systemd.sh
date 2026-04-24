@@ -13,7 +13,7 @@ USER_NAME="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 VENV_DIR="${VENV_DIR:-$USER_HOME/pytorch-env}"
 LMSTUDIO_DIR="${LMSTUDIO_DIR:-$USER_HOME/LMStudio}"
-LLAMA_DIR="${LLAMA_DIR:-$USER_HOME/llama.cpp-bin/llama-b8893}"
+LLAMA_DIR="${LLAMA_DIR:-$USER_HOME/llama.cpp-bin/current}"
 MODEL="${MODEL:-$USER_HOME/models/qwen25-coder-7b-q3.gguf}"
 
 _render_and_install() {

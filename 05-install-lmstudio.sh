@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Step 5: download the LM Studio AppImage and set it up as a launchable app.
+# Legacy optional: download the LM Studio AppImage and set it up as a launchable app.
+# The default provider is now 05-install-llama-server.sh.
 set -euo pipefail
 
 LMSTUDIO_DIR="${LMSTUDIO_DIR:-$HOME/LMStudio}"

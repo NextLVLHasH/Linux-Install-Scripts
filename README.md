@@ -1,11 +1,11 @@
-# LM Studio + Custom Trainer + Material 3 Dashboard
+# llama-server + Custom Trainer + Material 3 Dashboard
 
 End-to-end install scripts for Ubuntu (and ZimaOS / CasaOS) that set up:
 
-- **LM Studio** for local LLM inference
+- **llama.cpp `llama-server`** for headless local GGUF inference
 - **PyTorch + Hugging Face stack** for fine-tuning
 - A **custom LoRA trainer** that auto-scales from **6 GB → 96 GB per-GPU VRAM** and **1 → 9 GPUs** (DDP / FSDP / DeepSpeed ZeRO-3)
-- A **Material 3 web dashboard** that drives downloads, training, and an agent loop, and auto-launches LM Studio
+- A **Material 3 web dashboard** that drives downloads, training, local model serving, and an agent loop
 - A **command-execution agent** that runs shell commands the trained model emits — with hard-blocks, allowlists, and per-command approval
 - **systemd** auto-start on boot, or **Docker Compose** deployment for ZimaOS/CasaOS
 - A **cybersecurity dataset pipeline** (Canstralian/pentesting_dataset + the gfek/Real-CyberSecurity-Datasets catalog)
@@ -36,7 +36,7 @@ git pull
 ./09-start-dashboard.sh               # or just visit http://<host>:8765 — systemd already started it
 ```
 
-Open the dashboard, click **Launch LM Studio**, download a base model, upload or fetch a dataset, set LoRA params, hit **Start training**.
+Open the dashboard, use the **Server** tab to download/load a GGUF model, upload or fetch a dataset, set LoRA params, hit **Start training**.
 
 ## Quick start (headless ZimaOS / CasaOS)
 
@@ -162,19 +162,19 @@ python agent.py \
 | File | What it does |
 | --- | --- |
 | [01-update-system.sh](01-update-system.sh) | apt update / upgrade / dist-upgrade / autoremove |
-| [02-install-prerequisites.sh](02-install-prerequisites.sh) | build tools, Python 3, AppImage/GUI libs |
+| [02-install-prerequisites.sh](02-install-prerequisites.sh) | build tools, Python 3, optional GUI libs only when requested |
 | [03-install-nvidia-cuda.sh](03-install-nvidia-cuda.sh) | NVIDIA driver + CUDA toolkit (auto-skipped on CPU boxes) |
 | [04-install-pytorch.sh](04-install-pytorch.sh) | venv + PyTorch (CUDA 12.1 or CPU wheels) |
-| [05-install-lmstudio.sh](05-install-lmstudio.sh) | LM Studio AppImage + `.desktop` launcher |
+| [05-install-llama-server.sh](05-install-llama-server.sh) | Builds llama.cpp `llama-server` for headless OpenAI-compatible inference |
 | [06-install-training-deps.sh](06-install-training-deps.sh) | transformers, peft, trl, datasets, bitsandbytes, **deepspeed**, PyYAML |
 | [07-download-model.sh](07-download-model.sh) | wrapper: pulls a HF model into `./models/` |
 | [08-install-dashboard.sh](08-install-dashboard.sh) | FastAPI + uvicorn + SSE deps |
 | [09-start-dashboard.sh](09-start-dashboard.sh) | runs the dashboard on `0.0.0.0:8765` |
-| [10-install-systemd.sh](10-install-systemd.sh) | enables `lmstudio-dashboard.service` for boot auto-start |
+| [10-install-systemd.sh](10-install-systemd.sh) | enables the dashboard and `llama-server.service` for boot auto-start |
 | [11-fetch-cybersec-datasets.sh](11-fetch-cybersec-datasets.sh) | pulls Canstralian/pentesting_dataset + clones the gfek catalog |
 | [install-casaos.sh](install-casaos.sh) | optional: installs CasaOS on the host |
 | [install-all.sh](install-all.sh) | runs steps 1–11; honors `SKIP_*` env vars |
-| [start.sh](start.sh) | activates the venv and launches LM Studio (CLI shortcut) |
+| [start.sh](start.sh) | activates the venv and starts the dashboard |
 
 ### Python tools
 | File | What it does |
@@ -190,7 +190,7 @@ python agent.py \
 ### Dashboard
 | File | What it does |
 | --- | --- |
-| [dashboard/app.py](dashboard/app.py) | FastAPI backend; SSE log + agent streams; auto-launches LM Studio on startup |
+| [dashboard/app.py](dashboard/app.py) | FastAPI backend; SSE log + agent streams; controls `llama-server` |
 | [dashboard/static/index.html](dashboard/static/index.html) | Material 3 UI: hardware card, scaling controls, agent tab |
 | [dashboard/static/app.js](dashboard/static/app.js) | dashboard client logic |
 | [dashboard/static/styles.css](dashboard/static/styles.css) | Material 3 tokens + layout (light + dark) |
@@ -241,13 +241,12 @@ Three ways to get data in:
 
 ## Auto-start behavior
 
-- **Bare-metal Ubuntu/ZimaOS desktop:** step 10 installs a systemd unit. The
-  dashboard starts on every boot. With `DISPLAY=:0` set in the unit, the
-  dashboard's startup hook also auto-launches the LM Studio AppImage.
-- **Headless server / Docker:** the container sets `AUTO_LAUNCH_LMSTUDIO=0`
-  and the dashboard skips the GUI launch (no display server present).
-- Disable manually: `sudo systemctl disable --now lmstudio-dashboard` or set
-  `AUTO_LAUNCH_LMSTUDIO=0` in the unit.
+- **Bare-metal Ubuntu/ZimaOS:** step 10 installs systemd units. The dashboard
+  starts on every boot, and `llama-server.service` serves the pinned GGUF model.
+- **Headless server / Docker:** no GUI or virtual display is required.
+- Disable manually: `sudo systemctl disable --now lmstudio-dashboard.service`.
+  The service name is kept for upgrade compatibility; it now launches the
+  headless ML Stack dashboard, not the LM Studio GUI.
 
 ---
 
@@ -256,18 +255,19 @@ Three ways to get data in:
 | Var | Default | Used by |
 | --- | --- | --- |
 | `VENV_DIR` | `~/pytorch-env` | all venv-using scripts |
-| `LMSTUDIO_DIR` | `~/LMStudio` | step 5, dashboard, systemd unit |
-| `LMSTUDIO_URL` | pinned to 0.3.9-6 | step 5 — set to current URL from https://lmstudio.ai/ if 404s |
+| `LLAMA_DIR` | `~/llama.cpp-bin/current` | llama-server install/start scripts |
+| `LLAMA_BIN` | `$LLAMA_DIR/llama-server` | dashboard + start script |
+| `GGUF_MODELS_DIR` | `./models` / `~/models` | Server tab GGUF downloads |
 | `DASHBOARD_HOST` | `0.0.0.0` | step 9 |
 | `DASHBOARD_PORT` | `8765` | step 9 |
-| `AUTO_LAUNCH_LMSTUDIO` | `1` | dashboard startup |
+| `AUTO_LAUNCH_LMSTUDIO` | `0` | legacy LM Studio fallback only |
 | `SKIP_*` | — | `install-all.sh` (e.g. `SKIP_NVIDIA=1 SKIP_CYBERSEC=1`) |
 
 ---
 
 ## Notes & caveats
 
-- LM Studio distributes **GGUF (inference-only)** weights. Training requires
+- GGUF files are **inference-only**. Training requires
   the HF source weights — the dashboard's "Download base model" pulls those
   via `huggingface_hub`. You can't fine-tune a `.gguf` file directly.
 - 4-bit quantized loading via `bitsandbytes` only works on **CUDA**, and is

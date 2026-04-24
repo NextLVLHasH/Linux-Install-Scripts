@@ -13,7 +13,7 @@ This document is the *narrative* tour. For the file-by-file reference, see
 
 **Is:**
 - A reproducible install path for the full local-LLM stack (driver → CUDA →
-  PyTorch → Hugging Face → LM Studio).
+  PyTorch → Hugging Face → llama.cpp `llama-server`).
 - A LoRA fine-tuner that auto-scales from a single 6 GB consumer GPU up to
   a 9 × 96 GB rig (864 GB sharded).
 - A web dashboard you can use without ever touching the CLI.
@@ -24,7 +24,7 @@ This document is the *narrative* tour. For the file-by-file reference, see
 - A multi-tenant service. There's no auth — keep it on a trusted LAN or
   inside a container.
 - A GGUF converter. Trained adapters stay in HF format; conversion to GGUF
-  for LM Studio is a separate step you run yourself.
+  for llama-server is a separate step you run yourself.
 - A production training cluster. It's tuned for one host (1-9 GPUs).
   Multi-node would need an accelerate `--num_machines >1` config and shared
   storage.
@@ -73,7 +73,7 @@ This document is the *narrative* tour. For the file-by-file reference, see
 
 | Layer | Files | Concern |
 | --- | --- | --- |
-| **OS provisioning** | `01-` … `05-`, `install-casaos.sh` | apt, NVIDIA, Python venv, LM Studio AppImage, optional CasaOS |
+| **OS provisioning** | `01-` … `05-`, `install-casaos.sh` | apt, NVIDIA, Python venv, headless llama-server, optional CasaOS |
 | **ML stack** | `06-install-training-deps.sh`, `04-install-pytorch.sh` | PyTorch (CUDA 12.1), HF transformers/peft/trl/accelerate/bitsandbytes/deepspeed |
 | **Hardware abstraction** | `gpu_profile.py` | VRAM detection, training profiles (6→96 GB), strategy + accelerate-config rendering |
 | **Trainer** | `finetune.py`, `train.sh` | LoRA SFT, auto-tune, multi-GPU launch (DDP/FSDP/ZeRO-3) |
@@ -90,16 +90,17 @@ This document is the *narrative* tour. For the file-by-file reference, see
 The five scenarios this project is shaped around. Each one starts from the
 same dashboard.
 
-### A. Install everything on a fresh Ubuntu desktop
+### A. Install everything on a fresh Ubuntu / ZimaOS host
 ```
 ./install-all.sh
    → 01 update OS
-   → 02 prereqs (build tools, Python, AppImage libs)
-   → 03 NVIDIA driver + CUDA (skipped on CPU boxes)
-   → 04 PyTorch venv (~/pytorch-env, CUDA 12.1 or CPU wheels)
-   → 05 LM Studio AppImage → ~/LMStudio + .desktop launcher
-   → 06 transformers/peft/trl/datasets/bitsandbytes/deepspeed
+   → 02 prereqs (build tools, Python, optional GUI libs only if requested)
+   → 03a create Python venv (~/pytorch-env)
    → 08 FastAPI/uvicorn/sse-starlette
+   → 03 NVIDIA driver + CUDA (skipped on CPU boxes; may reboot/resume)
+   → 05 llama.cpp llama-server → ~/llama.cpp-bin/current
+   → 04 PyTorch (CUDA 12.1 or CPU wheels)
+   → 06 transformers/peft/trl/datasets/bitsandbytes/deepspeed
    → 11 cybersec datasets (Canstralian/pentesting + gfek catalog clone)
    → 10 systemd unit → dashboard auto-starts on boot
 ```
@@ -111,8 +112,9 @@ Reboot if the NVIDIA driver was new. Visit `http://<host>:8765`.
 docker compose up -d --build                 # GPU passthrough, NCCL tuning
                                              # http://<host>:8765
 ```
-The container has `AUTO_LAUNCH_LMSTUDIO=0` because there's no display server.
-You still get the trainer, dataset pipeline, and agent.
+The container includes `llama-server` and exposes the OpenAI-compatible API on
+`:1234`, with no display server required. You still get the trainer, dataset
+pipeline, and agent.
 
 ### C. Train a model from the dashboard
 ```
@@ -140,11 +142,10 @@ whether to run `python finetune.py …` (single GPU) or
 6. Output flows back into the model; it produces a final summary.
 ```
 
-### E. Use LM Studio for inference (parallel to training)
-The dashboard auto-launches LM Studio when it starts (if a display is
-present). LM Studio loads GGUF models for chat / OpenAI-compatible API on
-:1234. The trainer and LM Studio share nothing — they coexist for "train
-in HF format, serve in GGUF" workflows.
+### E. Use llama-server for inference (parallel to training)
+The dashboard controls llama.cpp `llama-server` on :1234. It loads GGUF
+models for chat / OpenAI-compatible API access without a GUI, virtual display,
+or VNC. The trainer and server share nothing: train in HF format, serve in GGUF.
 
 ---
 
@@ -368,15 +369,14 @@ For real isolation: container, dedicated unprivileged user, or a VM.
 
 ## 7. Deployment topologies
 
-### Bare-metal Ubuntu desktop (the default)
-- venv at `~/pytorch-env`, AppImage at `~/LMStudio/`, dashboard at
-  `:8765`, systemd unit auto-starts on boot.
-- LM Studio auto-launches with the dashboard if `$DISPLAY` is set in
-  the unit (`DISPLAY=:0`, `XAUTHORITY=~/.Xauthority`).
+### Bare-metal Ubuntu / ZimaOS (the default)
+- venv at `~/pytorch-env`, llama.cpp at `~/llama.cpp-bin/current/`,
+  dashboard at `:8765`, and systemd units auto-start on boot.
+- `llama-server.service` serves the pinned GGUF model on `:1234`.
 
 ### Headless Ubuntu / ZimaOS server
-- Same install scripts, but skip step 5 (or just don't launch LM Studio).
-- Set `AUTO_LAUNCH_LMSTUDIO=0` in the systemd unit.
+- Same install scripts. No GUI, virtual display, VNC, or LM Studio AppImage is
+  required for the default local provider.
 
 ### Docker container (recommended for ZimaOS / CasaOS)
 - `dashboard/Dockerfile` builds CUDA 12.1 + the full ML + DeepSpeed stack.
@@ -437,7 +437,7 @@ Add a case to `render_accelerate_config()` in
 | `./data/cybersec-catalog/` | Cloned gfek catalog | Re-pullable; safe to delete. |
 | `./runs/<name>/` | LoRA adapters, tokenizer, `training_meta.json`, tensorboard logs | Persistent. The agent loads adapters from here. |
 | `~/pytorch-env/` | Python venv | Re-creatable via step 4. |
-| `~/LMStudio/LMStudio.AppImage` | LM Studio binary | Re-pullable via step 5. |
+| `~/llama.cpp-bin/current/llama-server` | Headless inference server | Rebuildable via step 5. |
 | `/etc/systemd/system/lmstudio-dashboard.service` | Boot unit | Created by step 10; `systemctl disable` to remove. |
 | Container volumes | `models / data / runs / hf-cache` | Survive container restarts/rebuilds. |
 
@@ -451,7 +451,7 @@ Add a case to `render_accelerate_config()` in
 | Multi-GPU run hangs at startup | NCCL can't pick a device or shm too small | In Docker, set `shm_size: 8gb` and `ipc: host` (already in compose). |
 | FSDP with 4-bit OOM-loops | Incompatible combination | Trainer disables 4-bit under FSDP/ZeRO; if you forced it, drop `--force-4bit`. |
 | Trained adapter doesn't show in agent dropdown | No `adapter_model.safetensors` in the run dir | Training crashed before save; re-run, watch the log pane for the `[exit N]` line. |
-| LM Studio doesn't auto-launch with dashboard | No `$DISPLAY` (headless / Docker) | Expected. Manual launch via dashboard button or skip on headless. |
+| `llama-server` does not start | Missing GGUF model or binary | Run `./05-install-llama-server.sh`, download/select a GGUF in the Server tab, then run `./10-install-systemd.sh`. |
 | `accelerate launch` says "no module named yaml" | Step 6 was skipped on a CPU box | `pip install PyYAML` into the venv. |
 | Agent says "no tool call — stopping" immediately | Model not trained on tool format | Train on `data/sample_agent_commands.jsonl` (or your own), or pick a base model that already speaks tool-use. |
 | `nvidia-smi` shows GPUs but `gpu_profile detect` returns empty | nvidia-smi binary missing in `$PATH` | The Docker image expects NVIDIA Container Toolkit on the host. |
@@ -473,7 +473,7 @@ Add a case to `render_accelerate_config()` in
   weights/grads/optimizer state across GPUs.
 - **ZeRO-3** — DeepSpeed's stage-3 optimizer that shards everything
   and supports CPU/NVMe offload.
-- **GGUF** — The model file format LM Studio (and llama.cpp) consume.
+- **GGUF** — The model file format llama.cpp `llama-server` consumes.
   Quantized, inference-only, single file per model.
 - **bf16 / nf4** — Mixed-precision training in 16-bit brain-float;
   4-bit normal-float for `bitsandbytes` quantization.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Start LM Studio in a virtual display and stream the GUI to a browser via noVNC.
+# Legacy optional: start LM Studio in a virtual display and stream the GUI to a browser via noVNC.
+# The default headless provider is start-llama-server.sh.
 #
 # Access LM Studio at:  http://<server-ip>:6080/vnc.html
 #

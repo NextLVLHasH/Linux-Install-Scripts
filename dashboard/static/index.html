@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>LM Studio Trainer Dashboard</title>
+  <title>ML Stack Trainer Dashboard</title>
 
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=Roboto+Flex:opsz,wght@8..144,400;8..144,500;8..144,700&display=swap" />
   <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Symbols+Outlined" />
@@ -23,7 +23,7 @@
 
   <header class="topbar">
     <span class="material-symbols-outlined brand-icon">network_intelligence</span>
-    <h1 class="md-typescale-title-large">LM Studio Trainer</h1>
+    <h1 class="md-typescale-title-large">ML Stack Trainer</h1>
     <div class="spacer"></div>
   </header>
 
@@ -33,7 +33,7 @@
       <span class="material-symbols-outlined">model_training</span>Train
     </button>
     <button class="tab-btn" data-tab="lmstudio">
-      <span class="material-symbols-outlined">rocket_launch</span>LM Studio
+      <span class="material-symbols-outlined">rocket_launch</span>Server
     </button>
     <button class="tab-btn" data-tab="hardware">
       <span class="material-symbols-outlined">memory</span>Hardware
@@ -54,7 +54,7 @@
         <h2 class="md-typescale-title-medium">1. Download a base model</h2>
       </header>
       <p class="md-typescale-body-small hint">
-        Pulls HF source weights (safetensors) for fine-tuning. For GGUF inference models use the LM Studio tab.
+        Pulls HF source weights (safetensors) for fine-tuning. For GGUF inference models use the Server tab.
       </p>
       <md-outlined-text-field id="dl-repo" label="HF repo id" value="Qwen/Qwen2.5-0.5B"></md-outlined-text-field>
       <md-outlined-text-field id="dl-token" label="HF token (optional)" type="password"></md-outlined-text-field>
@@ -208,7 +208,7 @@
   </div><!-- /tab train -->
 
   <!-- ══════════════════════════════════════════════════════════
-       TAB: LM Studio
+       TAB: Model Server
   ══════════════════════════════════════════════════════════════ -->
   <div class="tab-panel grid" data-tab="lmstudio">
 
@@ -222,7 +222,7 @@
       </header>
 
       <div id="lms-not-installed" class="hint" hidden>
-        LM Studio AppImage not found. Run <code>./05-install-lmstudio.sh</code> first.
+        llama-server not found. Run <code>./05-install-llama-server.sh</code>, then <code>./10-install-systemd.sh</code>.
       </div>
 
       <div class="grid-2">
