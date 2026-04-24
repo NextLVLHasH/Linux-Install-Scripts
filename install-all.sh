@@ -206,6 +206,7 @@ BODY_ROWS=$(( TOTAL + 3 ))
 STEP_START_TICK=0
 _draw_body() {
     local tick=${1:-0} done_count=0 running_idx=-1
+    local i s
 
     for i in "${!S_NAME[@]}"; do
         local sym label name="${S_NAME[$i]}"
