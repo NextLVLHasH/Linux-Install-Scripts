@@ -48,7 +48,7 @@ fi
 
 # Resolve the *real* user's home even if the installer was launched with sudo,
 # so paths like ~/pytorch-env don't accidentally land under /root.
-REAL_USER="${REAL_USER:-${SUDO_USER:-$USER}}"
+REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
 

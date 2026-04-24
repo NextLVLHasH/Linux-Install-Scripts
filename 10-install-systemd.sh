@@ -9,7 +9,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-USER_NAME="${SUDO_USER:-$USER}"
+USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
 USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 VENV_DIR="${VENV_DIR:-$USER_HOME/pytorch-env}"
 LMSTUDIO_DIR="${LMSTUDIO_DIR:-$USER_HOME/LMStudio}"

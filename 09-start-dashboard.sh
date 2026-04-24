@@ -19,7 +19,7 @@ fi
 
 # Figure out the invoking user's home so ~/pytorch-env does not resolve to
 # /root when this script is started with sudo.
-REAL_USER="${REAL_USER:-${SUDO_USER:-$USER}}"
+REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
 

@@ -5,7 +5,7 @@
 # API on :1234 without Electron, Xvfb, VNC, or any desktop session.
 set -euo pipefail
 
-REAL_USER="${REAL_USER:-${SUDO_USER:-$USER}}"
+REAL_USER="${REAL_USER:-${SUDO_USER:-${USER:-$(id -un)}}}"
 REAL_HOME="${REAL_HOME:-$(getent passwd "$REAL_USER" 2>/dev/null | cut -d: -f6)}"
 : "${REAL_HOME:=$HOME}"
 
