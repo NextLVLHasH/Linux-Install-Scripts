@@ -16,6 +16,13 @@
 #   MODEL_CTX_MAX  override the model's trained ctx ceiling (default: probed from gguf)
 #   LLAMA_CTX_MAX  hard ceiling regardless of model (default: 1048576, effectively model-bound)
 #   OVERHEAD_MB    VRAM held back for compute buffers / OS (default: 256)
+#   LLAMA_API_KEY       API key enforced by llama-server. Auto-generated
+#                       (64 hex chars) on first run and persisted at
+#                       LLAMA_API_KEY_FILE so restarts are stable. Set
+#                       explicitly to pin a value.
+#   LLAMA_API_KEY_FILE  where the auto-generated key is stored
+#                       (default: ~/.cache/llama-server/api-key, 0600)
+#   LLAMA_API_KEY_ROTATE=1  force a new key even if one exists on disk
 set -euo pipefail
 
 MODEL="${MODEL:-$HOME/models/qwen25-coder-7b-q3.gguf}"
@@ -64,6 +71,38 @@ LLAMA_PARALLEL="${LLAMA_PARALLEL:-1}"
 # Use mlock to keep the model pages in RAM (prevents paging to disk under
 # pressure). Harmless on GPU-offloaded setups too.
 LLAMA_MLOCK="${LLAMA_MLOCK:-1}"
+
+# ── API key: require auth on every endpoint ──────────────────────────────
+# llama-server's --api-key flag rejects every request that doesn't carry
+# `Authorization: Bearer <key>`. We persist the generated key so a restart
+# doesn't break already-configured clients; set LLAMA_API_KEY_ROTATE=1 to
+# force a new one, or pass LLAMA_API_KEY=<value> to pin a specific key.
+LLAMA_API_KEY_FILE="${LLAMA_API_KEY_FILE:-$HOME/.cache/llama-server/api-key}"
+_gen_api_key() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -hex 32
+    elif [[ -r /dev/urandom ]]; then
+        head -c 32 /dev/urandom | od -An -v -tx1 | tr -d ' \n'
+    else
+        echo "ERROR: cannot generate API key (no openssl, no /dev/urandom)" >&2
+        exit 1
+    fi
+}
+if [[ -z "${LLAMA_API_KEY:-}" ]]; then
+    if [[ "${LLAMA_API_KEY_ROTATE:-0}" != "1" && -s "$LLAMA_API_KEY_FILE" ]]; then
+        LLAMA_API_KEY="$(tr -d '\r\n' < "$LLAMA_API_KEY_FILE")"
+    fi
+fi
+if [[ -z "${LLAMA_API_KEY:-}" ]]; then
+    LLAMA_API_KEY="$(_gen_api_key)"
+    mkdir -p "$(dirname "$LLAMA_API_KEY_FILE")"
+    ( umask 077 && printf '%s\n' "$LLAMA_API_KEY" > "$LLAMA_API_KEY_FILE" )
+    chmod 600 "$LLAMA_API_KEY_FILE" 2>/dev/null || true
+    KEY_NOTE="generated and saved to $LLAMA_API_KEY_FILE"
+else
+    KEY_NOTE="loaded from ${LLAMA_API_KEY_FILE} (or env)"
+fi
+export LLAMA_API_KEY
 
 if [[ ! -x "$LLAMA_BIN" ]]; then
     echo "ERROR: llama-server not found at $LLAMA_BIN"
@@ -338,6 +377,7 @@ echo "    flash-attn  : $LLAMA_FLASH_ATTN"
 echo "    batch/ubatch: ${LLAMA_BATCH}/${LLAMA_UBATCH}"
 echo "    parallel    : $LLAMA_PARALLEL"
 echo "    mlock       : $LLAMA_MLOCK"
+echo "    api-key     : ${LLAMA_API_KEY} (${KEY_NOTE})"
 
 # ── check port is free ──────────────────────────────────────────────────
 if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${LLAMA_PORT}\$"; then
@@ -354,12 +394,16 @@ export LD_LIBRARY_PATH="$LLAMA_DIR:${LD_LIBRARY_PATH:-}"
 echo ""
 echo "════════════════════════════════════════════════"
 echo "  llama-server → http://${LLAMA_BIND}:${LLAMA_PORT}/v1"
+echo "  API key (required): ${LLAMA_API_KEY}"
+echo "  Clients must send:  Authorization: Bearer ${LLAMA_API_KEY}"
+echo "  Key file:           ${LLAMA_API_KEY_FILE}"
 echo "════════════════════════════════════════════════"
 echo ""
 
 EXTRA_ARGS=()
 [[ "$LLAMA_MLOCK" == "1" ]]      && EXTRA_ARGS+=(--mlock)
 [[ -n "$LLAMA_TENSOR_SPLIT" ]]   && EXTRA_ARGS+=(--tensor-split "$LLAMA_TENSOR_SPLIT")
+EXTRA_ARGS+=(--api-key "$LLAMA_API_KEY")
 
 # Self-tuning launch loop: aim high, back off on early crash.
 # Two failure modes to back off from separately:

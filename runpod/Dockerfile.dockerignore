@@ -1,6 +1,0 @@
-# Build context = repo root (build with: docker build -f runpod/Dockerfile .)
-# Only the files the Dockerfile COPYs need to be sent to the daemon.
-*
-!download_model.py
-!start-llama-server.sh
-!runpod/handler.py
