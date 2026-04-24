@@ -9,6 +9,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
+# Skip cleanly in environments where systemd isn't PID 1 (Docker containers,
+# WSL without systemd, etc). daemon-reload/enable/start would all fail with
+# "Failed to connect to bus: Host is down", turning the whole step into a
+# red ✗ even though there is nothing actionable to do. The dashboard and
+# llama-server can still be run directly via start-llama-server.sh /
+# 09-start-dashboard.sh in that case.
+if [[ ! -d /run/systemd/system ]]; then
+    echo "==> systemd is not running (PID 1 is not systemd)."
+    echo "    Skipping service install — run ./09-start-dashboard.sh and"
+    echo "    ./start-llama-server.sh directly to launch the stack."
+    exit 0
+fi
+
 USER_NAME="${SUDO_USER:-${USER:-$(id -un)}}"
 USER_HOME=$(getent passwd "$USER_NAME" | cut -d: -f6)
 VENV_DIR="${VENV_DIR:-$USER_HOME/pytorch-env}"

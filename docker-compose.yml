@@ -17,12 +17,12 @@ services:
     container_name: trainer-dashboard
     restart: unless-stopped
     ports:
-      - "8765:8765"
+      - "8888:8888"
       - "1234:1234"
     environment:
       AUTO_LAUNCH_LMSTUDIO: "0"   # headless container; llama-server is the provider
       DASHBOARD_HOST: "0.0.0.0"
-      DASHBOARD_PORT: "8765"
+      DASHBOARD_PORT: "8888"
       LMS_API_PORT: "1234"
       LLAMA_BIND: "0.0.0.0"
       LLAMA_DIR: "/opt/llama.cpp-bin"
