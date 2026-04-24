@@ -21,30 +21,74 @@ from urllib.parse import parse_qs
 
 
 def _ensure_requirements() -> None:
+    missing = []
     try:
         import huggingface_hub  # noqa: F401
     except ImportError:
-        print("[download_model] huggingface_hub not found — installing...", flush=True)
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "huggingface_hub"])
+        missing.append("huggingface_hub")
+    try:
+        import tqdm  # noqa: F401
+    except ImportError:
+        missing.append("tqdm")
+    if missing:
+        print(f"[download_model] installing {', '.join(missing)}...", flush=True)
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
 
 
 _ensure_requirements()
 
+import os  # noqa: E402
+
+# Make sure HF's built-in tqdm progress bars are on, even if the user's
+# environment has HF_HUB_DISABLE_PROGRESS_BARS exported from a prior session.
+os.environ.pop("HF_HUB_DISABLE_PROGRESS_BARS", None)
+
 from huggingface_hub import snapshot_download, hf_hub_download, list_repo_files  # noqa: E402
+from huggingface_hub.utils import enable_progress_bars  # noqa: E402
+
+enable_progress_bars()
 
 
 def _parse_repo_arg(raw: str) -> tuple[str, str | None]:
     """Return (clean_repo_id, filename_or_None).
 
-    Handles HF website URLs like:
-      BlossomsAI/Foo?show_file_info=q4_k_m.gguf
+    Handles every shape you might paste from the HF website:
+      org/repo
+      org/repo?show_file_info=foo.gguf
+      https://huggingface.co/org/repo
+      https://huggingface.co/org/repo?show_file_info=foo.gguf
+      https://huggingface.co/org/repo/blob/<branch>/foo.gguf
+      https://huggingface.co/org/repo/resolve/<branch>/foo.gguf
+      https://huggingface.co/org/repo/tree/<branch>
     """
+    raw = raw.strip()
+    # Pull off any query string for separate parsing.
+    query = ""
     if "?" in raw:
-        repo_part, query_part = raw.split("?", 1)
-        params = parse_qs(query_part)
-        filename = params.get("show_file_info", [None])[0]
-        return repo_part.strip(), filename
-    return raw.strip(), None
+        raw, query = raw.split("?", 1)
+    # Strip the HF host prefix if present.
+    for prefix in (
+        "https://huggingface.co/",
+        "http://huggingface.co/",
+        "huggingface.co/",
+    ):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    parts = raw.strip("/").split("/")
+    if len(parts) < 2:
+        return raw, None
+    repo_id = f"{parts[0]}/{parts[1]}"
+    filename: str | None = None
+    # /blob/<ref>/<path> or /resolve/<ref>/<path> — extract the file path.
+    if len(parts) >= 5 and parts[2] in ("blob", "resolve"):
+        filename = "/".join(parts[4:])
+    # ?show_file_info= overrides any path-derived filename.
+    if query:
+        sfi = parse_qs(query).get("show_file_info", [None])[0]
+        if sfi:
+            filename = sfi
+    return repo_id, filename
 
 
 def _resolve_gguf_filename(repo_id: str, hint: str, token: str | None) -> str:

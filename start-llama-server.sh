@@ -8,10 +8,14 @@
 #   LLAMA_PORT     API port                    (default: 1234)
 #   LLAMA_BIND     interface IP to listen on   (default: first LAN IP)
 #   LLAMA_NGL      layers offloaded to GPU     (default: 99 = all)
+#   LLAMA_TENSOR_SPLIT  comma-sep per-GPU weights for multi-GPU
+#                       (default: auto, proportional to per-GPU VRAM)
 #   LLAMA_CTX      context length              (default: auto — largest that fits in VRAM)
 #   LLAMA_THREADS  CPU threads                 (default: nproc)
-#   KV_BYTES_PER_TOKEN  override KV-cache estimate per token, bytes (default: 65536)
-#   OVERHEAD_MB    VRAM held back for compute buffers / OS (default: 1024)
+#   KV_BYTES_PER_TOKEN  override KV-cache estimate per token, bytes (default: probed from gguf)
+#   MODEL_CTX_MAX  override the model's trained ctx ceiling (default: probed from gguf)
+#   LLAMA_CTX_MAX  hard ceiling regardless of model (default: 1048576, effectively model-bound)
+#   OVERHEAD_MB    VRAM held back for compute buffers / OS (default: 256)
 set -euo pipefail
 
 MODEL="${MODEL:-$HOME/models/qwen25-coder-7b-q3.gguf}"
@@ -33,8 +37,13 @@ KV_BYTES_PER_TOKEN_FALLBACK=35000
 OVERHEAD_MB="${OVERHEAD_MB:-256}"
 
 # Context ceiling — llama.cpp caps at 128K internally but some builds
-# permit higher. Set LLAMA_CTX_MAX to override the 131072 clamp.
-LLAMA_CTX_MAX="${LLAMA_CTX_MAX:-131072}"
+# permit higher. We also pull the model's *trained* context length from
+# the gguf header below and clamp to whichever is smaller, so a 32K
+# model never gets pushed to 131K (rope-extrapolates badly) and a
+# 256K-trained model isn't artificially throttled. Set LLAMA_CTX_MAX
+# to override the hard ceiling, MODEL_CTX_MAX to override the per-model
+# clamp.
+LLAMA_CTX_MAX="${LLAMA_CTX_MAX:-1048576}"
 
 # ── throughput knobs ──────────────────────────────────────────────────────
 # Flash Attention: 20–40 % prefill + a bit of decode speedup, costs no extra
@@ -67,29 +76,32 @@ if [[ ! -f "$MODEL" ]]; then
     exit 1
 fi
 
-# ── probe gguf for KV cache size per token ───────────────────────────────
-# Use llama-cli --show-metadata to dump the gguf header, then compute:
-#   bytes_per_token = 2 (K+V) × n_layers × head_count_kv × head_dim × 2 (fp16)
-# where head_dim prefers attention.key_length if present, otherwise falls
-# back to embedding_length / head_count. Halve for flash-attn on
-# backends that can share a single cache (best-effort — if unsure we
-# keep the full size and let the retry loop back off).
-_probe_kv_per_token() {
-    # Caller-supplied override wins.
-    if [[ -n "${KV_BYTES_PER_TOKEN:-}" ]]; then
-        echo "$KV_BYTES_PER_TOKEN"; return
+# ── probe gguf for KV cache size per token + model's trained ctx ─────────
+# Parse the gguf header ourselves (llama.cpp's own CLIs don't expose a
+# stable metadata-dump flag across versions). We pull two things in one
+# pass:
+#   1. bytes_per_token = 2 (K+V) × n_attn_layers × head_count_kv × head_dim × 2 (fp16)
+#      — head_dim prefers attention.key_length, else embedding_length / head_count.
+#   2. <arch>.context_length — the model's trained max position. We clamp
+#      ctx to this so we never rope-extrapolate past the training window.
+# Stdout: two whitespace-separated values "<KV_BPT> <MODEL_CTX>".
+# stderr gets the human summary. Falls back silently on parse error.
+_probe_gguf() {
+    # Caller-supplied overrides win for either field.
+    local kv_override="${KV_BYTES_PER_TOKEN:-}"
+    local ctx_override="${MODEL_CTX_MAX:-}"
+    if [[ -n "$kv_override" && -n "$ctx_override" ]]; then
+        echo "$kv_override $ctx_override"; return
     fi
     if ! command -v python3 >/dev/null 2>&1; then
-        echo "$KV_BYTES_PER_TOKEN_FALLBACK"; return
+        echo "$KV_BYTES_PER_TOKEN_FALLBACK 0"; return
     fi
-    # Parse the gguf header directly. llama.cpp's own CLIs don't expose a
-    # stable metadata-dump flag across versions, so do it ourselves — the
-    # format is documented + simple. Prints the per-token KV size to stdout
-    # and a human summary to stderr; falls back silently to the default on
-    # any parse problem.
-    python3 - "$MODEL" "$KV_BYTES_PER_TOKEN_FALLBACK" <<'PY' 2>/dev/null
+    python3 - "$MODEL" "$KV_BYTES_PER_TOKEN_FALLBACK" "$kv_override" "$ctx_override" <<'PY' 2>/dev/null
 import struct, sys
-path, fallback = sys.argv[1], int(sys.argv[2])
+path        = sys.argv[1]
+fallback    = int(sys.argv[2])
+kv_override = sys.argv[3]
+ctx_override= sys.argv[4]
 
 def read_str(f):
     (n,) = struct.unpack('<Q', f.read(8))
@@ -113,7 +125,7 @@ def read_value(f, vt):
 try:
     with open(path, 'rb') as f:
         if f.read(4) != b'GGUF':
-            print(fallback); sys.exit(0)
+            print(f'{fallback} 0'); sys.exit(0)
         struct.unpack('<I', f.read(4))             # version
         (_, n_kv) = struct.unpack('<QQ', f.read(16))
         kv = {}
@@ -130,6 +142,7 @@ try:
     kl     = kv.get(P('attention.key_length'))
     vl     = kv.get(P('attention.value_length'))
     emb    = kv.get(P('embedding_length'))
+    ctxlen = kv.get(P('context_length')) or 0
 
     # Hybrid architectures (Qwen 3.5 Gated Delta Net, Mamba/Jamba, ...)
     # only put full attention on every Nth layer; the rest use recurrent
@@ -140,7 +153,7 @@ try:
     has_ssm       = any(k.startswith(f'{arch}.ssm.') for k in kv)
 
     if layers is None or khv is None:
-        print(fallback); sys.exit(0)
+        print(f'{fallback} {ctxlen}'); sys.exit(0)
     if kl is None and nh and emb:
         kl = emb // nh
     kl = kl or 128
@@ -160,19 +173,24 @@ try:
 
     # K cache + V cache, fp16, one entry per (layer, kv_head) per token.
     bpt = attn_layers * khv * (kl + vl) * 2
-    print(bpt)
+    bpt_out = int(kv_override) if kv_override else bpt
+    ctx_out = int(ctx_override) if ctx_override else ctxlen
+    print(f'{bpt_out} {ctx_out}')
     print(f'    KV from gguf: arch={arch} layers={layers} kv_heads={khv} '
-          f'key_len={kl} val_len={vl}{hybrid_note} → {bpt} B/token',
+          f'key_len={kl} val_len={vl}{hybrid_note} → {bpt} B/token, '
+          f'trained_ctx={ctxlen or "unknown"}',
           file=sys.stderr)
 except Exception as e:
-    print(fallback)
+    print(f'{fallback} 0')
     print(f'    gguf probe failed: {e}', file=sys.stderr)
 PY
 }
 
 # ── auto-size context window ─────────────────────────────────────────────
 # Strategy:
-#   1. Start with the llama.cpp ceiling (LLAMA_CTX_MAX, default 131072).
+#   1. Start with min(LLAMA_CTX_MAX, MODEL_CTX_MAX_FROM_GGUF). The model's
+#      trained context length is the real upper bound — going past it
+#      means rope-extrapolation, which silently degrades quality.
 #   2. Cap that by what the static VRAM-budget formula says can fit:
 #        usable_kv_mb = free_vram - 1.1 × model_weights - overhead
 #        max_ctx      = usable_kv_mb × 1024² / KV_BYTES_PER_TOKEN
@@ -181,40 +199,132 @@ PY
 #   3. Round down to the nearest 1024.
 #
 # If this overshoots in reality (OOM at load), the launch loop further
-# down halves the ctx and retries — so "smart 131072" means we aim for
-# the ceiling and let the retry loop back off until it fits.
-_auto_ctx() {
-    local free_mb total_mb model_bytes model_mb usable ctx="$LLAMA_CTX_MAX"
+# down halves the ctx and retries — so we aim for the ceiling and let
+# the retry loop back off until it fits.
+# Probe free/total VRAM in MiB across *all* GPUs we can detect. NVIDIA via
+# nvidia-smi, AMD via the amdgpu sysfs nodes (works without rocm-smi
+# installed; bytes-precise). Echoes a single line:
+#   "<free_mb_sum> <total_mb_sum> <vendor> <gpu_count> <per_gpu_total_csv>"
+# Sums let _auto_ctx budget against the full pool; per-GPU CSV feeds
+# --tensor-split so layers split proportionally on asymmetric rigs
+# (e.g. a 24G + 12G pair gets a 24,12 split, not 50/50). Returns 1 if
+# nothing is detectable.
+_detect_vram() {
+    local free_sum=0 total_sum=0 count=0 totals_csv=""
     if command -v nvidia-smi >/dev/null 2>&1; then
-        free_mb=$(nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
-        total_mb=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')
+        local f t
+        while IFS=',' read -r f t; do
+            f=${f// /}
+            t=${t// /}
+            [[ "$f" =~ ^[0-9]+$ && "$t" =~ ^[0-9]+$ ]] || continue
+            (( t > 0 )) || continue
+            free_sum=$(( free_sum + f ))
+            total_sum=$(( total_sum + t ))
+            totals_csv+="${totals_csv:+,}$t"
+            count=$(( count + 1 ))
+        done < <(nvidia-smi --query-gpu=memory.free,memory.total --format=csv,noheader,nounits 2>/dev/null)
+        if (( count > 0 )); then
+            echo "$free_sum $total_sum nvidia $count $totals_csv"; return 0
+        fi
     fi
-    if [[ -n "${free_mb:-}" && "$free_mb" -gt 0 ]]; then
+    # AMD amdgpu sysfs — sum every card that exposes VRAM info.
+    local d total_b used_b t_mb f_mb
+    for d in /sys/class/drm/card*/device; do
+        [[ -r "$d/mem_info_vram_total" ]] || continue
+        total_b=$(cat "$d/mem_info_vram_total" 2>/dev/null) || continue
+        [[ "$total_b" =~ ^[0-9]+$ ]] || continue
+        (( total_b > 0 )) || continue
+        used_b=$(cat "$d/mem_info_vram_used" 2>/dev/null || echo 0)
+        [[ "$used_b" =~ ^[0-9]+$ ]] || used_b=0
+        t_mb=$(( total_b / 1048576 ))
+        f_mb=$(( (total_b - used_b) / 1048576 ))
+        free_sum=$(( free_sum + f_mb ))
+        total_sum=$(( total_sum + t_mb ))
+        totals_csv+="${totals_csv:+,}$t_mb"
+        count=$(( count + 1 ))
+    done
+    if (( count > 0 )); then
+        echo "$free_sum $total_sum amd $count $totals_csv"; return 0
+    fi
+    return 1
+}
+
+# Globals populated by the probe — consumed by _auto_ctx and the launch
+# loop further down.
+VRAM_FREE_MB=0
+VRAM_TOTAL_MB=0
+VRAM_VENDOR=""
+VRAM_GPU_COUNT=0
+VRAM_PER_GPU=""
+
+_auto_ctx() {
+    local model_bytes model_mb usable ceiling="$LLAMA_CTX_MAX" ctx
+    # Clamp ceiling by the model's trained context length (if known).
+    if (( MODEL_CTX_MAX > 0 )) && (( MODEL_CTX_MAX < ceiling )); then
+        ceiling="$MODEL_CTX_MAX"
+    fi
+    ctx="$ceiling"
+
+    if (( VRAM_GPU_COUNT > 0 )); then
         model_bytes=$(stat -c %s "$MODEL" 2>/dev/null || echo 0)
         model_mb=$(( model_bytes / 1048576 ))
         model_mb=$(( model_mb + model_mb / 10 ))
-        usable=$(( free_mb - model_mb - OVERHEAD_MB ))
+        # Per-GPU overhead: llama.cpp allocates compute buffers on each
+        # device, not just one. Scale OVERHEAD_MB by GPU count so a
+        # 4-GPU rig isn't accidentally under-budgeted.
+        local total_overhead=$(( OVERHEAD_MB * VRAM_GPU_COUNT ))
+        usable=$(( VRAM_FREE_MB - model_mb - total_overhead ))
         if (( usable >= 256 )); then
             local budget=$(( usable * 1048576 / KV_BYTES_PER_TOKEN ))
             (( budget < ctx )) && ctx=$budget
         else
             ctx=2048
         fi
-        printf "    VRAM: %d / %d MiB free · model ~%d MiB · overhead %d MiB · KV %d B/token → aim ctx=%d (ceiling %d)\n" \
-            "$free_mb" "$total_mb" "$model_mb" "$OVERHEAD_MB" "$KV_BYTES_PER_TOKEN" "$ctx" "$LLAMA_CTX_MAX" >&2
+        printf "    VRAM (%s, %d GPU%s [%s] MiB): %d / %d MiB free total · model ~%d MiB · overhead %d MiB (%d × %d) · KV %d B/token · model_ctx_max=%d → aim ctx=%d (ceiling %d)\n" \
+            "$VRAM_VENDOR" "$VRAM_GPU_COUNT" "$([[ $VRAM_GPU_COUNT -gt 1 ]] && echo s)" "$VRAM_PER_GPU" \
+            "$VRAM_FREE_MB" "$VRAM_TOTAL_MB" "$model_mb" \
+            "$total_overhead" "$VRAM_GPU_COUNT" "$OVERHEAD_MB" \
+            "$KV_BYTES_PER_TOKEN" "$MODEL_CTX_MAX" "$ctx" "$ceiling" >&2
+    else
+        # No GPU info — refuse to honor a ceiling we can't validate.
+        # The retry loop can only shrink, so being optimistic here means
+        # OOM at load with no signal as to why. Cap to 8K and tell the
+        # user how to override.
+        local safe_default=8192
+        (( safe_default > ceiling )) && safe_default=$ceiling
+        ctx=$safe_default
+        printf "    WARNING: no GPU VRAM info (no nvidia-smi, no amdgpu sysfs). Defaulting ctx=%d. Set LLAMA_CTX=<n> to override.\n" \
+            "$ctx" >&2
     fi
-    (( ctx > LLAMA_CTX_MAX )) && ctx=$LLAMA_CTX_MAX
-    (( ctx <  2048 ))         && ctx=2048
+    (( ctx > ceiling )) && ctx=$ceiling
+    (( ctx <  2048 ))   && ctx=2048
     ctx=$(( (ctx / 1024) * 1024 ))
     echo "$ctx"
 }
 
+echo "==> Probing GPUs..."
+if read -r VRAM_FREE_MB VRAM_TOTAL_MB VRAM_VENDOR VRAM_GPU_COUNT VRAM_PER_GPU < <(_detect_vram); then
+    echo "    detected $VRAM_GPU_COUNT $VRAM_VENDOR GPU(s): [$VRAM_PER_GPU] MiB, $VRAM_FREE_MB / $VRAM_TOTAL_MB MiB free total"
+else
+    echo "    no GPU detected via nvidia-smi or amdgpu sysfs"
+fi
+
 if [[ -z "${LLAMA_CTX:-}" ]]; then
-    echo "==> Probing gguf for KV cache footprint..."
-    KV_BYTES_PER_TOKEN=$(_probe_kv_per_token)
-    export KV_BYTES_PER_TOKEN
+    echo "==> Probing gguf for KV cache footprint + trained context..."
+    read -r KV_BYTES_PER_TOKEN MODEL_CTX_MAX < <(_probe_gguf)
+    : "${KV_BYTES_PER_TOKEN:=$KV_BYTES_PER_TOKEN_FALLBACK}"
+    : "${MODEL_CTX_MAX:=0}"
+    export KV_BYTES_PER_TOKEN MODEL_CTX_MAX
     echo "==> Computing max context for available VRAM..."
     LLAMA_CTX=$(_auto_ctx)
+fi
+
+# Build tensor-split arg for multi-GPU rigs. llama.cpp accepts raw memory
+# values and normalizes them, so we just hand it the per-GPU MiB CSV.
+# A user-supplied LLAMA_TENSOR_SPLIT wins.
+LLAMA_TENSOR_SPLIT="${LLAMA_TENSOR_SPLIT:-}"
+if [[ -z "$LLAMA_TENSOR_SPLIT" && "$VRAM_GPU_COUNT" -gt 1 ]]; then
+    LLAMA_TENSOR_SPLIT="$VRAM_PER_GPU"
 fi
 
 echo "==> llama-server args:"
@@ -222,6 +332,7 @@ echo "    model       : $MODEL"
 echo "    bind        : ${LLAMA_BIND}:${LLAMA_PORT}"
 echo "    ctx         : $LLAMA_CTX"
 echo "    gpu-layers  : $LLAMA_NGL"
+echo "    gpu count   : $VRAM_GPU_COUNT${LLAMA_TENSOR_SPLIT:+ (tensor-split=${LLAMA_TENSOR_SPLIT})}"
 echo "    threads     : $LLAMA_THREADS"
 echo "    flash-attn  : $LLAMA_FLASH_ATTN"
 echo "    batch/ubatch: ${LLAMA_BATCH}/${LLAMA_UBATCH}"
@@ -247,7 +358,8 @@ echo "════════════════════════�
 echo ""
 
 EXTRA_ARGS=()
-[[ "$LLAMA_MLOCK" == "1" ]] && EXTRA_ARGS+=(--mlock)
+[[ "$LLAMA_MLOCK" == "1" ]]      && EXTRA_ARGS+=(--mlock)
+[[ -n "$LLAMA_TENSOR_SPLIT" ]]   && EXTRA_ARGS+=(--tensor-split "$LLAMA_TENSOR_SPLIT")
 
 # Self-tuning launch loop: aim high, back off on early crash.
 # Two failure modes to back off from separately:
