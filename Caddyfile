@@ -1,0 +1,74 @@
+# Caddy reverse proxy for the HasH AI stack with **mutual TLS** between the API and the
+# pod. The cert IS the credential — there is no basic-auth, no API key inside the body.
+# Caddy refuses any connection whose client cert isn't signed by the trusted CA below.
+#
+# CRITICAL: mTLS does NOT survive the Runpod HTTP proxy (Cloudflare terminates TLS there
+# and re-handshakes to the pod, dropping client certs). Use Runpod's TCP proxy instead —
+# expose port 443 as TCP, then connect via the raw <host>:<external-port> URL given in
+# the Runpod console. Caddy terminates TLS on the pod itself.
+#
+# Cert layout expected on the pod:
+#   /etc/hashai/ca.crt            — CA cert that signed the API's client cert
+#   /etc/hashai/server.crt        — server cert presented by Caddy
+#   /etc/hashai/server.key        — matching private key
+#
+# Generate them once on a trusted box (NOT on the pod) using gen-mtls-certs.sh in this
+# directory, then `scp` server.* + ca.crt to the pod and ca.crt + client.* to the API.
+#
+# Usage:
+#   sudo cp ca.crt server.crt server.key /etc/hashai/
+#   SITE_ADDR=:443 caddy run --config /workspace/HasHCloudAIServerCode/Caddyfile
+
+{
+	admin off
+}
+
+{$SITE_ADDR::443} {
+	# Server cert + mTLS client-cert verification.
+	tls /etc/hashai/server.crt /etc/hashai/server.key {
+		client_auth {
+			# `require_and_verify` = present a cert AND it must chain to a trusted CA.
+			# Anything weaker (e.g. `request`) defeats the point.
+			mode require_and_verify
+			trusted_ca_cert_file /etc/hashai/ca.crt
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options    "nosniff"
+		Referrer-Policy           "no-referrer"
+		X-Frame-Options           "DENY"
+		-Server
+	}
+
+	# llama-server: /v1/* → 127.0.0.1:1234.
+	@llama path /v1/*
+	handle @llama {
+		reverse_proxy 127.0.0.1:1234 {
+			transport http {
+				read_timeout  600s
+				write_timeout 600s
+				dial_timeout   10s
+			}
+			# Forward the verified client-cert subject so the upstream (and HasHAI-API
+			# logs) can see WHICH client connected. Only present when mTLS verified.
+			header_up X-Client-CN {tls_client_subject}
+			header_up X-Real-IP   {remote_host}
+		}
+	}
+
+	# Optional: dashboard reachable through the same mTLS edge.
+	@dash path /dashboard/*
+	handle @dash {
+		uri strip_prefix /dashboard
+		reverse_proxy 127.0.0.1:8765 {
+			header_up X-Client-CN     {tls_client_subject}
+			header_up X-Forwarded-Prefix /dashboard
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+}

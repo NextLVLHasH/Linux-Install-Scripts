@@ -15,7 +15,7 @@ End-to-end install scripts for Ubuntu (and ZimaOS / CasaOS) that set up:
 ## Get the code (Linux)
 
 ```bash
-sudo apt update && sudo apt install -y git           # if git isn't already installed
+apt update && apt install -y git           # if git isn't already installed
 git clone https://github.com/NextLVLHasH/Linux-Install-Scripts.git
 cd Linux-Install-Scripts
 chmod +x *.sh                                        # make the installers executable

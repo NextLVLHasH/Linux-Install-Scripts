@@ -5,7 +5,7 @@
 #
 # Env knobs:
 #   LMS_API_PORT      port for the API            (default 1234)
-#   LMS_BIND          interface to listen on      (default first LAN IP)
+#   LMS_BIND          interface to listen on      (default 0.0.0.0)
 #   LMS_DEFAULT_MODEL model identifier to load    (default: none)
 #   LMS_GPU           GPU offload                 (default max)
 #   LMS_CTX           context length              (default 4096)
@@ -13,8 +13,10 @@ set -euo pipefail
 
 LMS_BIN="$HOME/.lmstudio/bin/lms"
 LMS_API_PORT="${LMS_API_PORT:-1234}"
-LMS_BIND="${LMS_BIND:-$(hostname -I 2>/dev/null | awk '{print $1}')}"
-LMS_BIND="${LMS_BIND:-127.0.0.1}"
+# Bind to 0.0.0.0 so container port-mapping (Docker, RunPod, k8s) and
+# DHCP-renewed LAN IPs Just Work, matching the llama-server default.
+# Pin to a specific interface by setting LMS_BIND=<ip>.
+LMS_BIND="${LMS_BIND:-0.0.0.0}"
 LMS_DEFAULT_MODEL="${LMS_DEFAULT_MODEL:-}"
 LMS_GPU="${LMS_GPU:-max}"
 LMS_CTX="${LMS_CTX:-4096}"
