@@ -483,10 +483,49 @@ fi
 #    retry at native context as fallback.
 # ---------------------------------------------------------------------------
 step "7/7  Launch llama-server on :$PORT"
+
+# Detect what IP / URL clients can actually reach this endpoint at. llama-server
+# binds to 0.0.0.0 which is "all interfaces" — that doesn't tell you what to
+# type into HasH AI's settings. So probe every angle:
+#   1. RUNPOD_POD_ID env var → RunPod's public proxy URL (most useful)
+#   2. RUNPOD_PUBLIC_IP / RUNPOD_TCP_PORT_<port> → direct TCP if assigned
+#   3. External IP via `curl ifconfig.me` (works on any cloud pod with egress)
+#   4. Local LAN IPs via `hostname -I` (useful when same-machine / VPN)
+#   5. Always: 127.0.0.1:PORT for on-pod smoke tests
+#
+# All probes are cheap (<2s) and any failure is non-fatal.
+ENDPOINTS=()
+if [ -n "${RUNPOD_POD_ID:-}" ]; then
+  ENDPOINTS+=("https://${RUNPOD_POD_ID}-${PORT}.proxy.runpod.net/v1  (RunPod proxy)")
+fi
+RP_PORT_VAR="RUNPOD_TCP_PORT_${PORT}"
+if [ -n "${!RP_PORT_VAR:-}" ] && [ -n "${RUNPOD_PUBLIC_IP:-}" ]; then
+  ENDPOINTS+=("http://${RUNPOD_PUBLIC_IP}:${!RP_PORT_VAR}/v1  (RunPod direct TCP)")
+fi
+if have curl; then
+  EXT_IP=$(curl -fsS --max-time 2 https://ifconfig.me 2>/dev/null || curl -fsS --max-time 2 https://ipinfo.io/ip 2>/dev/null || true)
+  if [ -n "$EXT_IP" ]; then
+    ENDPOINTS+=("http://${EXT_IP}:${PORT}/v1  (public IP — exposed only if pod template forwards :$PORT)")
+  fi
+fi
+LAN_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^$' | grep -v '^127\.' | head -3)
+for ip in $LAN_IPS; do
+  ENDPOINTS+=("http://${ip}:${PORT}/v1  (LAN/container IP)")
+done
+ENDPOINTS+=("http://127.0.0.1:${PORT}/v1  (on-pod only — for curl smoke tests)")
+
 echo "    model:    $REAL_MODEL"
 echo "    context:  $TARGET_CONTEXT tokens (YaRN factor=$ROPE_SCALE from $YARN_ORIG_CTX-trained)"
 echo "    KV cache: $KV_CACHE_TYPE"
-echo "    endpoint: http://0.0.0.0:$PORT/v1"
+echo
+echo "    Reachable at:"
+for ep in "${ENDPOINTS[@]}"; do
+  echo "      $ep"
+done
+echo
+echo "    Point HasH AI's OpenAI-compatible setting at the first URL that's"
+echo "    publicly reachable from your desktop. For a Cloudflare tunnel instead:"
+echo "        cloudflared tunnel --url http://localhost:$PORT"
 echo
 
 ROPE_FREQ_SCALE=$(awk -v n="$ROPE_SCALE" 'BEGIN{printf "%.6f", 1.0/n}')
