@@ -324,6 +324,32 @@ REAL_MODEL=$(readlink -f "$EXPECTED_PATH")
 echo "    resolved: $REAL_MODEL"
 ls -lh "$REAL_MODEL" | awk '{print "    size:    "$5}'
 
+# Register the model with LM Studio's catalog so `lms ls` and `lms load` see it.
+# We deliberately skip `lms import` here — that command creates a symlink with
+# a wrong relative target (../../blobs/<hash>) which dangles unless you
+# repair it manually. Instead, drop a direct absolute symlink to the real GGUF
+# straight into ~/.lmstudio/models/<creator>/<name>/<file>.gguf, which is the
+# layout LM Studio's scanner expects. Restart the daemon so it picks up the
+# new entry before we exec llama-server.
+LMS_CREATOR="${MODEL_REPO%/*}"
+LMS_NAME="${MODEL_REPO#*/}"
+LMS_MODEL_DIR="$HOME/.lmstudio/models/$LMS_CREATOR/$LMS_NAME"
+LMS_MODEL_LINK="$LMS_MODEL_DIR/$(basename "$MODEL_FILE")"
+mkdir -p "$LMS_MODEL_DIR"
+# Replace any prior link (broken or otherwise) with a fresh absolute one
+rm -f "$LMS_MODEL_LINK"
+ln -s "$REAL_MODEL" "$LMS_MODEL_LINK"
+echo "    registered with LM Studio: $LMS_CREATOR/$LMS_NAME"
+echo "    lms link: $LMS_MODEL_LINK -> $REAL_MODEL"
+
+# Restart the daemon if it's already running so it rescans. Failures here are
+# non-fatal — the model is already on disk for llama-server either way.
+if have lms; then
+  lms server stop >/dev/null 2>&1 || true
+  lms server start >/dev/null 2>&1 || true
+  echo "    lms server restarted; verify with: lms ls"
+fi
+
 # ---------------------------------------------------------------------------
 # 9. Locate llama-server (inside the LM Studio runtime, now on /workspace)
 # ---------------------------------------------------------------------------
@@ -364,16 +390,56 @@ echo "    OpenAI-compatible endpoint: http://0.0.0.0:$PORT/v1"
 echo "    Wait for 'all slots are idle' before pointing HasH AI at it."
 echo
 
+# `--rope-freq-scale` is the inverse of `--rope-scale` (1/N). Some llama.cpp
+# builds want one, some want the other; setting both is unambiguous and
+# harmless. `--verbose` makes llama-server log the resolved `n_ctx` separately
+# from the model's `n_ctx_train` so you can confirm 1M actually applied — look
+# for "n_ctx = 1010000" vs "n_ctx_train = 262144" in the startup output.
+#
+# If llama.cpp's loader still clamps to n_ctx_train (can happen with very new
+# architectures whose YaRN config isn't yet recognized), we run a second attempt
+# at the model's native context as a fallback so the endpoint still comes up.
+ROPE_FREQ_SCALE=$(awk -v n="$ROPE_SCALE" 'BEGIN{ printf "%.6f", 1.0 / n }')
+
+LAUNCH_ARGS=(
+  --model "$REAL_MODEL"
+  --host 0.0.0.0
+  --port "$PORT"
+  --n-gpu-layers 999
+  --ctx-size "$TARGET_CONTEXT"
+  --rope-scaling yarn
+  --rope-scale "$ROPE_SCALE"
+  --rope-freq-scale "$ROPE_FREQ_SCALE"
+  --rope-freq-base "$ROPE_FREQ_BASE"
+  --yarn-orig-ctx "$YARN_ORIG_CTX"
+  --cache-type-k "$KV_CACHE_TYPE"
+  --cache-type-v "$KV_CACHE_TYPE"
+  --metrics
+  --no-warmup
+  --verbose
+)
+
+echo "    attempting $TARGET_CONTEXT context via YaRN (factor=$ROPE_SCALE, freq-scale=$ROPE_FREQ_SCALE)"
+echo "    if llama.cpp clamps and exits, we'll retry at native $YARN_ORIG_CTX as fallback"
+echo
+
+# First attempt: extended context via YaRN.
+if "$LLAMA_SERVER" "${LAUNCH_ARGS[@]}"; then
+  exit 0
+fi
+
+# YaRN attempt failed (non-zero exit) — fall back to the model's native context.
+# This swaps --ctx-size to YARN_ORIG_CTX, drops YaRN flags, and re-launches.
+echo
+echo "==> Fallback: YaRN attempt exited non-zero. Retrying at native $YARN_ORIG_CTX context."
+echo
+
 exec "$LLAMA_SERVER" \
   --model "$REAL_MODEL" \
   --host 0.0.0.0 \
   --port "$PORT" \
   --n-gpu-layers 999 \
-  --ctx-size "$TARGET_CONTEXT" \
-  --rope-scaling yarn \
-  --rope-scale "$ROPE_SCALE" \
-  --rope-freq-base "$ROPE_FREQ_BASE" \
-  --yarn-orig-ctx "$YARN_ORIG_CTX" \
+  --ctx-size "$YARN_ORIG_CTX" \
   --cache-type-k "$KV_CACHE_TYPE" \
   --cache-type-v "$KV_CACHE_TYPE" \
   --metrics \
