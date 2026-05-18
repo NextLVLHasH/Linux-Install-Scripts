@@ -47,10 +47,20 @@ KV_CACHE_TYPE="${KV_CACHE_TYPE:-q8_0}"
 step() { echo; echo "==> $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Auto-create PERSIST if it doesn't exist. The previous strict check (error +
+# exit) protected against typos where PERSIST pointed at a non-existent mount
+# and would have created a wrong-place dir under /. In practice the friction
+# of asking users to `mkdir -p` before every run on a pod without /workspace
+# was worse than the typo risk. mkdir is bounded; if PERSIST is unwritable
+# the mkdir itself fails and the script exits cleanly with a real error.
 if [ ! -d "$PERSIST" ]; then
-  echo "ERROR: \$PERSIST=$PERSIST does not exist. Set PERSIST to your template's"
-  echo "       persistent mount (/workspace, /runpod-volume, /persistent, …)."
-  exit 1
+  if ! mkdir -p "$PERSIST" 2>/dev/null; then
+    echo "ERROR: \$PERSIST=$PERSIST could not be created. Pick a writable path:"
+    echo "       e.g. /workspace (RunPod template volume), /runpod-volume,"
+    echo "       /persistent, or /root/lm on pods without a network volume."
+    exit 1
+  fi
+  echo "    created $PERSIST (it didn't exist yet)"
 fi
 
 # ---------------------------------------------------------------------------
