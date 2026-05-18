@@ -187,14 +187,47 @@ export PATH="$HOME/.lmstudio/bin:$HOME/.cache/lm-studio/bin:$PATH"
 
 if have lms; then
   echo "    lms ready: $(command -v lms)"
-  echo
-  echo "    To pair this pod with your LM Studio cloud account, run AFTER this"
-  echo "    script finishes:"
-  echo "        lms login"
-  echo "    It will print a 3-word code; enter it at:"
-  echo "        https://lmstudio.ai/pairing"
+  # Detect which install layout is in use so later steps know where the
+  # models/ tree lives.
+  if [ -x "$HOME/.lmstudio/bin/lms" ]; then
+    LM_HOME="$HOME/.lmstudio"
+  elif [ -x "$HOME/.cache/lm-studio/bin/lms" ]; then
+    LM_HOME="$HOME/.cache/lm-studio"
+  else
+    LM_HOME=""
+  fi
+  [ -n "$LM_HOME" ] && echo "    LM_HOME: $LM_HOME"
+
+  # Interactive login. Skipped on non-TTY runs (e.g. `nohup … &`) or when
+  # SKIP_LMS_LOGIN=1. Otherwise we run `lms login` inline — it prints a
+  # 3-word pairing code and blocks until you enter it at
+  # https://lmstudio.ai/pairing, then returns. Existing tokens persist
+  # at $LM_HOME/credentials/ which is symlinked to /workspace, so this
+  # only fires on a truly fresh setup.
+  LOGGED_IN=0
+  if [ -d "$LM_HOME/credentials" ] && find "$LM_HOME/credentials" -name "*.json" -type f 2>/dev/null | grep -q .; then
+    LOGGED_IN=1
+  fi
+
+  if [ "$LOGGED_IN" = "1" ]; then
+    echo "    already paired with LM Studio cloud"
+  elif [ "${SKIP_LMS_LOGIN:-0}" = "1" ]; then
+    echo "    SKIP_LMS_LOGIN=1 — not pairing. To pair later, run: lms login"
+  elif [ -t 0 ] && [ -t 1 ]; then
+    echo
+    echo "    Pairing this pod with your LM Studio cloud account."
+    echo "    Press Enter to start (or Ctrl-C, then re-run with SKIP_LMS_LOGIN=1)."
+    read -r _
+    lms login || echo "    lms login returned non-zero; continuing anyway"
+  else
+    echo
+    echo "    Non-interactive run — skipping lms login. To pair later:"
+    echo "        lms login          # prints a 3-word code"
+    echo "        # paste it at:    https://lmstudio.ai/pairing"
+  fi
 else
   echo "    WARNING: lms still not on PATH after install — check the installer output above"
+  LM_HOME=""
 fi
 
 # ---------------------------------------------------------------------------
@@ -399,6 +432,38 @@ fi
 REAL_MODEL=$(readlink -f "$EXPECTED_PATH")
 echo "    resolved: $REAL_MODEL ($(ls -lh "$REAL_MODEL" | awk '{print $5}'))"
 
+# Register the model with LM Studio's catalog so `lms ls` / `lms load` see it
+# without you running `lms import` manually (which is interactive and creates
+# a broken relative symlink — we use an absolute symlink instead so the
+# pointer always resolves regardless of where /workspace gets mounted).
+#
+# Drops the .gguf at <LM_HOME>/models/<creator>/<repo-name>/<file>.gguf, which
+# is the layout LM Studio's scanner expects. We do this for whichever LM
+# Studio home is in use, AND for both layouts if both exist (the older
+# ~/.lmstudio and the newer ~/.cache/lm-studio) — cheap and idempotent.
+LMS_CREATOR="${MODEL_REPO%/*}"
+LMS_NAME="${MODEL_REPO#*/}"
+LMS_REGISTERED=0
+for root in "$HOME/.lmstudio" "$HOME/.cache/lm-studio"; do
+  [ -d "$root" ] || continue
+  target_dir="$root/models/$LMS_CREATOR/$LMS_NAME"
+  target_link="$target_dir/$(basename "$MODEL_FILE")"
+  mkdir -p "$target_dir"
+  rm -f "$target_link"
+  ln -s "$REAL_MODEL" "$target_link"
+  echo "    registered: $target_link"
+  LMS_REGISTERED=1
+done
+
+# Restart the lms daemon so the catalog rescan picks up the new entry.
+# Failures here are non-fatal — llama-server can still use $REAL_MODEL
+# directly without lms knowing about the model.
+if [ "$LMS_REGISTERED" = "1" ] && have lms; then
+  lms server stop >/dev/null 2>&1 || true
+  lms server start >/dev/null 2>&1 || true
+  echo "    lms server restarted; verify with: lms ls"
+fi
+
 # ---------------------------------------------------------------------------
 # 5. Free port + kill stale launchers
 # ---------------------------------------------------------------------------
@@ -426,12 +491,25 @@ echo
 
 ROPE_FREQ_SCALE=$(awk -v n="$ROPE_SCALE" 'BEGIN{printf "%.6f", 1.0/n}')
 
+# llama-server defaults to 4 parallel slots and clamps each slot's context to
+# the model's training context (n_ctx_train, 262144 for Qwen3.6). With 1M
+# total split 4 ways that gives 4 concurrent conversations at 256k each —
+# fine for serving, useless if you want ONE long-context chat.
+#
+# Default to --parallel 1 so the full TARGET_CONTEXT goes to a single slot.
+# Override PARALLEL=4 (or whatever) if you actually want concurrent slots.
+PARALLEL="${PARALLEL:-1}"
+
+echo "    parallel slots: $PARALLEL (each slot up to $TARGET_CONTEXT tokens)"
+echo
+
 if "$LLAMA_SERVER" \
     --model "$REAL_MODEL" \
     --host 0.0.0.0 \
     --port "$PORT" \
     --n-gpu-layers 999 \
     --ctx-size "$TARGET_CONTEXT" \
+    --parallel "$PARALLEL" \
     --rope-scaling yarn \
     --rope-scale "$ROPE_SCALE" \
     --rope-freq-scale "$ROPE_FREQ_SCALE" \
