@@ -376,17 +376,83 @@ if have lms; then
 fi
 
 # ---------------------------------------------------------------------------
-# 9. Locate llama-server (inside the LM Studio runtime, now on /workspace).
-#    Search both possible LM Studio homes so layout changes don't break us.
+# 9. Locate or build llama-server.
+#
+#    Recent LM Studio releases ("llmster" >= 2.13) ship llama.cpp only as
+#    shared libraries (libllama.so / libggml_llamacpp.so) — they embed the
+#    inference engine in the lms daemon via dlopen and no longer drop a
+#    standalone `llama-server` binary on disk. That means the YaRN / KV-cache
+#    quant flags can't be passed through the lms CLI, so to actually run at
+#    1M context we have to build llama-server ourselves from source. Cached
+#    on $PERSIST so the build is one-time across pod restarts.
 # ---------------------------------------------------------------------------
-step "9/10  Locate llama-server"
+step "9/10  Locate or build llama-server"
+
+CUSTOM_BUILD="$PERSIST/llama.cpp/build/bin/llama-server"
+
+# 9.a — Look first in LM Studio's bundled runtime (old layout). On 2.13+ this
+#       will return nothing because LM Studio ships only the .so libs now.
 LLAMA_SERVER=$(find "$LM_HOME" "$HOME/.lmstudio" "$HOME/.cache/lm-studio" -name "llama-server" -executable -type f 2>/dev/null | head -1)
-if [ -z "$LLAMA_SERVER" ]; then
-  echo "ERROR: llama-server not found anywhere under $LM_HOME / ~/.lmstudio / ~/.cache/lm-studio"
-  echo "       Re-run 'lms bootstrap' to install the llama.cpp runtime, then re-run this script."
-  exit 1
+
+# 9.b — Then look for a previously-built copy on $PERSIST. After the first
+#       successful build below, every subsequent pod start finds it here in
+#       milliseconds and skips the whole build step.
+if [ -z "$LLAMA_SERVER" ] && [ -x "$CUSTOM_BUILD" ]; then
+  LLAMA_SERVER="$CUSTOM_BUILD"
+  echo "    found previously-built binary: $LLAMA_SERVER"
 fi
-echo "    $LLAMA_SERVER"
+
+# 9.c — Nothing on disk → build it. We need llama-server with CUDA support so
+#       the model actually runs on the GPU. Build dependencies are installed
+#       only if missing; clone is shallow; build target is just llama-server.
+if [ -z "$LLAMA_SERVER" ]; then
+  echo "    llama-server not bundled by LM Studio 2.13+ — building from source"
+  echo "    one-time cost ≈ 3-5 min on a CUDA-capable pod; cached on $PERSIST"
+  echo
+
+  # Install build deps if any are missing. apt-get update only fires when
+  # something's actually missing so we don't pay for it on re-runs.
+  MISSING_DEPS=""
+  for pkg in git cmake build-essential; do
+    dpkg -s "$pkg" >/dev/null 2>&1 || MISSING_DEPS="$MISSING_DEPS $pkg"
+  done
+  if [ -n "$MISSING_DEPS" ]; then
+    echo "    installing build deps:$MISSING_DEPS"
+    apt-get update -qq && apt-get install -y $MISSING_DEPS
+  fi
+
+  # Clone (or update) llama.cpp on /workspace. Shallow clone keeps it small.
+  if [ ! -d "$PERSIST/llama.cpp/.git" ]; then
+    git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$PERSIST/llama.cpp"
+  else
+    echo "    llama.cpp clone exists; pulling latest"
+    (cd "$PERSIST/llama.cpp" && git pull --rebase --autostash 2>/dev/null || true)
+  fi
+
+  # Configure + build. -DGGML_CUDA=ON requires nvcc; if the pod doesn't have
+  # the full CUDA toolkit installed, fall back to a CPU-only build (much
+  # slower but at least functional).
+  cd "$PERSIST/llama.cpp"
+  if have nvcc; then
+    echo "    configuring CUDA build (nvcc found)"
+    cmake -B build -DGGML_CUDA=ON >/dev/null
+  else
+    echo "    WARNING: nvcc not found — building CPU-only llama-server."
+    echo "             Inference will fall back to CPU which is very slow."
+    cmake -B build >/dev/null
+  fi
+  echo "    compiling llama-server (-j $(nproc))"
+  cmake --build build --config Release --target llama-server -j "$(nproc)"
+  cd - >/dev/null
+
+  if [ ! -x "$CUSTOM_BUILD" ]; then
+    echo "ERROR: build finished but llama-server isn't at $CUSTOM_BUILD"
+    exit 1
+  fi
+  LLAMA_SERVER="$CUSTOM_BUILD"
+fi
+
+echo "    using: $LLAMA_SERVER"
 
 # ---------------------------------------------------------------------------
 # 10. Free the port and exec llama-server with YaRN + Q8 KV + 1M context
