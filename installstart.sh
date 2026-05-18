@@ -135,6 +135,10 @@ mkdir -p \
 relink() {
   local target="$1" link="$2"
   [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ] && return
+  # Make sure the parent dir of the link exists — fresh pods may not yet have
+  # /root/.cache, so `ln -s /workspace/.cache/huggingface /root/.cache/huggingface`
+  # fails with "No such file or directory" without this.
+  mkdir -p "$(dirname "$link")"
   if [ -d "$link" ] && [ ! -L "$link" ]; then
     cp -an "$link"/. "$target"/ 2>/dev/null || true
     rm -rf "$link"
@@ -251,6 +255,119 @@ export LD_LIBRARY_PATH="$PREBUILT_DIR/lib:${LD_LIBRARY_PATH:-}"
 if ! "$LLAMA_SERVER" --version >/dev/null 2>&1; then
   echo "WARNING: llama-server failed --version — likely a CUDA driver mismatch."
   echo "         Confirm nvidia-smi works on this pod and the driver supports CUDA 12."
+fi
+
+# ---------------------------------------------------------------------------
+# 4.5  GPU arch compatibility check + auto-rebuild.
+#
+#      The prebuilt llama-server includes CUDA kernels compiled for a fixed
+#      set of architectures (sm_75 through sm_90 by default in
+#      build-release.sh). If this pod's GPU is newer than what's baked in —
+#      most importantly Blackwell (sm_120 on RTX Pro 6000 Blackwell, sm_100
+#      on B100/B200) — every CUDA kernel dispatch dies with
+#      "no kernel image is available for execution on the device".
+#
+#      Detection:
+#        1. Read GPU compute_cap from nvidia-smi → "12.0" → sm_120.
+#        2. List the binary's embedded archs via cuobjdump.
+#        3. If GPU's sm_* isn't in the list, rebuild from source on this pod
+#           with -DCMAKE_CUDA_ARCHITECTURES=native so kernels match exactly.
+# ---------------------------------------------------------------------------
+step "4.5/7  GPU arch compatibility check"
+if ! have nvidia-smi; then
+  echo "    no nvidia-smi — skipping (CPU-only setup?)"
+else
+  GPU_COMPUTE_CAP=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 | tr -d ' ')
+  GPU_SM=$(echo "$GPU_COMPUTE_CAP" | awk -F. '{printf "%d%d", $1, $2}')
+  echo "    GPU compute capability: $GPU_COMPUTE_CAP (sm_$GPU_SM)"
+
+  NEEDS_REBUILD=0
+  CUOBJDUMP=""
+  for cand in cuobjdump /usr/local/cuda-12.8/bin/cuobjdump /usr/local/cuda*/bin/cuobjdump; do
+    [ -x "$cand" ] && { CUOBJDUMP="$cand"; break; }
+  done
+  if [ -n "$CUOBJDUMP" ]; then
+    # cuobjdump --list-elf prints lines like "ELF file 1: <name>.sm_86.cubin".
+    # Grep the binary itself + the cuda shared lib (most kernels live in libggml-cuda.so).
+    ARCHS=$("$CUOBJDUMP" --list-elf "$PREBUILT_DIR/lib/libggml-cuda.so" 2>/dev/null \
+      | grep -oE 'sm_[0-9]+' | sort -u | tr '\n' ' ')
+    if [ -z "$ARCHS" ]; then
+      ARCHS=$("$CUOBJDUMP" --list-elf "$LLAMA_SERVER" 2>/dev/null \
+        | grep -oE 'sm_[0-9]+' | sort -u | tr '\n' ' ')
+    fi
+    echo "    prebuilt archs: ${ARCHS:-<none found>}"
+    if [ -n "$ARCHS" ] && ! echo " $ARCHS " | grep -q " sm_$GPU_SM "; then
+      echo "    MISMATCH: prebuilt has no sm_$GPU_SM kernels for this GPU"
+      NEEDS_REBUILD=1
+    fi
+  else
+    # Fallback: pessimistic detection on Blackwell, since that's the most
+    # common case where prebuilts trip. sm major >= 10 = Blackwell or newer.
+    GPU_MAJOR=$(echo "$GPU_COMPUTE_CAP" | awk -F. '{print $1}')
+    if [ "${GPU_MAJOR:-0}" -ge 10 ]; then
+      echo "    cuobjdump not available; assuming Blackwell-class GPU needs rebuild"
+      NEEDS_REBUILD=1
+    else
+      echo "    cuobjdump not available; trusting prebuilt"
+    fi
+  fi
+
+  if [ "$NEEDS_REBUILD" = "1" ]; then
+    step "4.6/7  Auto-rebuild llama.cpp for sm_$GPU_SM"
+    # Find nvcc — could be on PATH already, or under /usr/local/cuda*/bin
+    if ! have nvcc; then
+      NVCC_FOUND=""
+      for cand in /usr/local/cuda-12.8/bin/nvcc /usr/local/cuda-12/bin/nvcc /usr/local/cuda/bin/nvcc; do
+        [ -x "$cand" ] && { NVCC_FOUND="$cand"; export PATH="$(dirname "$cand"):$PATH"; break; }
+      done
+      [ -z "$NVCC_FOUND" ] && for cand in /usr/local/cuda*/bin/nvcc; do
+        [ -x "$cand" ] && { export PATH="$(dirname "$cand"):$PATH"; break; }
+      done
+    fi
+    if ! have nvcc; then
+      echo "ERROR: nvcc not found — cannot rebuild. Install CUDA toolkit:"
+      echo "       apt-get install -y nvidia-cuda-toolkit"
+      exit 1
+    fi
+    # Make sure build deps are installed
+    for pkg in git cmake build-essential; do
+      dpkg -s "$pkg" >/dev/null 2>&1 || apt-get install -y "$pkg" 2>&1 | tail -1
+    done
+    REBUILD_SRC="$PERSIST/llama-build-src"
+    if [ ! -d "$REBUILD_SRC/.git" ]; then
+      git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$REBUILD_SRC"
+    fi
+    cd "$REBUILD_SRC"
+    rm -rf build
+    echo "    configuring with CMAKE_CUDA_ARCHITECTURES=$GPU_SM"
+    cmake -B build -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
+      -DBUILD_SHARED_LIBS=ON \
+      -DCMAKE_CUDA_ARCHITECTURES="$GPU_SM" \
+      -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+      -DLLAMA_BUILD_TOOLS=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_BUILD_COMMON=ON \
+      >/dev/null
+    echo "    compiling (-j $(nproc))"
+    cmake --build build --config Release --target llama-server --target llama -j "$(nproc)"
+    cd - >/dev/null
+
+    # Swap the broken prebuilt files for the freshly-built ones. Preserve the
+    # SONAME chain via cp -a.
+    echo "    swapping prebuilt with local build"
+    cp -af "$REBUILD_SRC/build/bin/llama-server" "$PREBUILT_DIR/bin/llama-server"
+    rm -f "$PREBUILT_DIR/lib"/*.so*
+    for pat in 'libllama.so*' 'libggml*.so*' 'libmtmd.so*' 'libllama-common.so*'; do
+      while IFS= read -r src; do
+        [ -e "$src" ] && cp -a "$src" "$PREBUILT_DIR/lib/"
+      done < <(find "$REBUILD_SRC/build" -maxdepth 4 -name "$pat" 2>/dev/null)
+    done
+
+    # Re-verify
+    if LD_LIBRARY_PATH="$PREBUILT_DIR/lib" "$LLAMA_SERVER" --version >/dev/null 2>&1; then
+      echo "    rebuild succeeded; llama-server --version OK"
+    else
+      echo "    WARNING: --version still fails after rebuild — check $REBUILD_SRC/build for errors"
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------
