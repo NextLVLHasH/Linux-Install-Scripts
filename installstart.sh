@@ -432,17 +432,33 @@ if [ -z "$LLAMA_SERVER" ]; then
   # Configure + build. -DGGML_CUDA=ON requires nvcc; if the pod doesn't have
   # the full CUDA toolkit installed, fall back to a CPU-only build (much
   # slower but at least functional).
-  cd "$PERSIST/llama.cpp"
+  #
+  # BUILD_SHARED_LIBS=ON produces .so files alongside the binary. We need
+  # these only when OVERLAY_LMS_LIBS=1 (next step) wants to swap LM Studio's
+  # bundled libs for our YaRN-capable build; default builds remain statically
+  # linked into llama-server so they don't need .so resolution at runtime.
+  CMAKE_ARGS=()
   if have nvcc; then
     echo "    configuring CUDA build (nvcc found)"
-    cmake -B build -DGGML_CUDA=ON >/dev/null
+    CMAKE_ARGS+=(-DGGML_CUDA=ON)
   else
     echo "    WARNING: nvcc not found — building CPU-only llama-server."
     echo "             Inference will fall back to CPU which is very slow."
-    cmake -B build >/dev/null
   fi
+  if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
+    echo "    OVERLAY_LMS_LIBS=1 — building shared libs too so we can overlay"
+    CMAKE_ARGS+=(-DBUILD_SHARED_LIBS=ON)
+  fi
+  cd "$PERSIST/llama.cpp"
+  cmake -B build "${CMAKE_ARGS[@]}" >/dev/null
   echo "    compiling llama-server (-j $(nproc))"
-  cmake --build build --config Release --target llama-server -j "$(nproc)"
+  # When overlaying, build the full project so we get every .so. Otherwise just
+  # the llama-server target — shaves a couple minutes off the cold build.
+  if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
+    cmake --build build --config Release -j "$(nproc)"
+  else
+    cmake --build build --config Release --target llama-server -j "$(nproc)"
+  fi
   cd - >/dev/null
 
   if [ ! -x "$CUSTOM_BUILD" ]; then
@@ -453,6 +469,61 @@ if [ -z "$LLAMA_SERVER" ]; then
 fi
 
 echo "    using: $LLAMA_SERVER"
+
+# ---------------------------------------------------------------------------
+# 9.5  (optional) Overlay LM Studio's bundled llama.cpp .so files with our
+#      YaRN-capable build. Off by default — set OVERLAY_LMS_LIBS=1 to enable.
+#
+#      LM Studio 2.13+ uses non-standard library names (libggml_llamacpp.so
+#      instead of llama.cpp's split libggml.so / libggml-base.so / libggml-cuda.so),
+#      so the ABI may not match and `lms load` could break. Originals are
+#      backed up as <name>.lmstudio-bak; restore with the printed one-liner.
+# ---------------------------------------------------------------------------
+if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
+  step "9.5/10 Overlay LM Studio libs with YaRN-capable build"
+  BUILD_LIB_DIR="$PERSIST/llama.cpp/build/bin"
+  # CUDA build is the one we actually use; CPU/Vulkan stay untouched. If you
+  # need to overlay those too, copy this block and swap the backend pattern.
+  CUDA_BACKEND=$(find "$LM_HOME/extensions/backends" -maxdepth 1 -type d -name "llama.cpp-linux-*nvidia-cuda*" 2>/dev/null | head -1)
+  if [ -z "$CUDA_BACKEND" ]; then
+    echo "    no LM Studio CUDA backend found; skipping overlay"
+  else
+    echo "    target: $CUDA_BACKEND"
+    overlay_one() {
+      local src_basename="$1" dst_basename="$2"
+      local src="$BUILD_LIB_DIR/$src_basename"
+      local dst="$CUDA_BACKEND/$dst_basename"
+      if [ ! -f "$src" ]; then
+        echo "    skip ${dst_basename}: build didn't produce $src"
+        return
+      fi
+      # Back up original once. If a backup already exists from a prior run
+      # we don't overwrite it — that preserves the ORIGINAL LM Studio lib
+      # across multiple overlay attempts.
+      if [ -f "$dst" ] && [ ! -f "${dst}.lmstudio-bak" ]; then
+        cp -p "$dst" "${dst}.lmstudio-bak"
+      fi
+      cp -f "$src" "$dst"
+      echo "    overlay: $(basename "$dst") (backup at ${dst}.lmstudio-bak)"
+    }
+    # llama.cpp's modern split-library layout exports libggml.so + libggml-base.so
+    # + libggml-cuda.so + libllama.so. LM Studio merges these into a single
+    # libggml_llamacpp.so. We can't perfectly map the split → merged form, so
+    # we overlay each candidate and let the loader sort it out; if linking
+    # symbols fails, the restore command at the end gets you back to working.
+    overlay_one libllama.so libllama.so
+    overlay_one libggml.so libggml_llamacpp.so
+    # If neither libggml.so was produced (very old llama.cpp), try libggml-base
+    if [ ! -f "$BUILD_LIB_DIR/libggml.so" ] && [ -f "$BUILD_LIB_DIR/libggml-base.so" ]; then
+      overlay_one libggml-base.so libggml_llamacpp.so
+    fi
+    echo
+    echo "    LM Studio libs overlaid with our YaRN build."
+    echo "    To restore originals if 'lms load' breaks, run:"
+    echo "        for f in \"$CUDA_BACKEND\"/*.lmstudio-bak; do mv -f \"\$f\" \"\${f%.lmstudio-bak}\"; done"
+    echo
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # 10. Free the port and exec llama-server with YaRN + Q8 KV + 1M context
