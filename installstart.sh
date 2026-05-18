@@ -1,99 +1,70 @@
 #!/bin/bash
-# installstart.sh — One-shot RunPod install + start script.
+# Build/LMStudioServer/installstart.sh — Pod-side installer + launcher.
 #
-# Stands up DavidAU's Qwen3.6-40B-Deck-Opus (uncensored, NEO-CODE Q8_0) and starts
-# llama-server with 1,010,000-token context via YaRN rope scaling + Q8 KV cache
-# quantization. Endpoint lands at http://0.0.0.0:1234/v1 — point HasH AI there.
+# Downloads the YaRN-capable llama-server release from NextLVLHasH/AgentsRemoteBuild,
+# extracts it to $PERSIST/llama.cpp-prebuilt/, fetches the GGUF model you point
+# at via HF_URL, and launches llama-server with full YaRN + Q8 KV at 1M context.
 #
-# PERSISTENCE MODEL — RunPod deletes container storage when a pod terminates;
-# only /workspace (the template / network-volume drive) survives. This script
-# redirects every install location to /workspace BEFORE running any installer
-# so a stop/start cycle doesn't wipe LM Studio, the HF cache, the pip packages,
-# or the login token. On a fresh pod, just re-run the script — it detects
-# everything still on /workspace and skips the slow parts (download, bootstrap)
-# while redoing the ephemeral pieces (home-dir symlinks, ~/.bashrc, venv
-# activation). First run ≈ 15 min (mostly model download). Restart re-run ≈ 30s.
+# No LM Studio install, no source build — just download + run. The release is
+# pinned by default to a known-good tag (RELEASE_URL below); set RELEASE_URL to
+# override, or set USE_LATEST=1 to auto-discover the newest release.
 #
-# Usage:
+# Usage on a RunPod pod (inside tmux):
 #   chmod +x installstart.sh
-#   ./installstart.sh
-#   # Foreground — run inside tmux/screen if you'll disconnect:
-#   tmux new -s llama
-#   ./installstart.sh
-#   # Ctrl-b d to detach; reattach with: tmux attach -t llama
+#   HF_URL="https://huggingface.co/<owner>/<repo>?show_file_info=<file>.gguf" ./installstart.sh
+#
+# Environment overrides:
+#   RELEASE_URL     — exact tarball URL. Default: pinned yarn-45b455e build.
+#   USE_LATEST      — set to 1 to query GitHub for the latest release URL instead.
+#   PERSIST         — persistent drive root. Default: /workspace
+#   LLAMA_PORT      — endpoint port. Default: 1234
+#   ROPE_*/YARN_*   — YaRN params (defaults tuned for Qwen3.6).
+#   KV_CACHE_TYPE   — k/v cache quant. Default: q8_0.
 
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Config — overridable via env vars; otherwise prompted for at runtime
+# Config
 # ---------------------------------------------------------------------------
-PERSIST="${PERSIST:-/workspace}"        # RunPod's persistent drive
+PERSIST="${PERSIST:-/workspace}"
 PORT="${LLAMA_PORT:-1234}"
 
-# YaRN rope-scaling parameters. These defaults extend Qwen3.6's native 262144
-# context to ~1.01M tokens via factor=4. Override via env vars for other models:
-#   ROPE_FREQ_BASE — leave at the model's native value unless the card says otherwise
-#   ROPE_SCALE     — multiplier; 1 disables YaRN (uses native context)
-#   YARN_ORIG_CTX  — the model's TRAINED context length (not the scaled target)
-#   TARGET_CONTEXT — what you want to actually run at; must equal YARN_ORIG_CTX*ROPE_SCALE
+# The release tarball this pod will pull. Default uses GitHub's /releases/latest/
+# alias so any future build-and-publish run becomes the new default without
+# editing this script — as long as the published filename stays the same
+# (`lm-link-yarn-<llama-sha>-linux-x64-cuda12.tar.gz`). Override RELEASE_URL
+# to pin a specific tag, or set USE_LATEST=1 to auto-discover the asset name
+# via the GitHub API (handles filename changes between releases).
+RELEASE_URL="${RELEASE_URL:-https://github.com/NextLVLHasH/AgentsRemoteBuild/releases/latest/download/lm-link-yarn-45b455e-linux-x64-cuda12.tar.gz}"
+
+# YaRN rope-scaling params. Defaults extend Qwen3.6's 262k native context to ~1M.
 ROPE_FREQ_BASE="${ROPE_FREQ_BASE:-10000000}"
 ROPE_SCALE="${ROPE_SCALE:-4}"
 YARN_ORIG_CTX="${YARN_ORIG_CTX:-262144}"
 TARGET_CONTEXT="${TARGET_CONTEXT:-1010000}"
-
-# KV cache quantization. FP16 KV at 1M would need ~96 GB on its own — mandatory
-# to quantize on a 96 GB card. q8_0 = 48 GB at 1M, q4_0 = 24 GB. Quality drop
-# from q8_0 is negligible; q4_0 starts to show on long-context recall tasks.
 KV_CACHE_TYPE="${KV_CACHE_TYPE:-q8_0}"
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 step() { echo; echo "==> $*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 if [ ! -d "$PERSIST" ]; then
   echo "ERROR: \$PERSIST=$PERSIST does not exist. Set PERSIST to your template's"
-  echo "       persistent mount (/workspace on most RunPod templates, sometimes"
-  echo "       /runpod-volume or /persistent). Run 'df -h' to find it."
+  echo "       persistent mount (/workspace, /runpod-volume, /persistent, …)."
   exit 1
 fi
 
 # ---------------------------------------------------------------------------
-# 0. Resolve the Hugging Face model. Three input shapes accepted:
-#
-#    (a) Full URL with the file picker query — what you get by clicking a file
-#        on the repo page and copying the URL:
-#        https://huggingface.co/OWNER/REPO?show_file_info=PATH/TO/FILE.gguf
-#
-#    (b) Direct file URL — works with either `/blob/main/` or `/resolve/main/`:
-#        https://huggingface.co/OWNER/REPO/blob/main/PATH/TO/FILE.gguf
-#        https://huggingface.co/OWNER/REPO/resolve/main/PATH/TO/FILE.gguf
-#
-#    (c) Repo URL only — downloads the whole repo (every quant); script will
-#        prompt for which file to launch with:
-#        https://huggingface.co/OWNER/REPO
-#
-# Input source priority: $HF_URL env var → first positional arg → interactive
-# prompt. The script is re-runnable; for a fresh pod, set HF_URL and skip the
-# prompt so unattended re-runs after `tmux new` work the same way.
+# 0. Resolve the Hugging Face model URL → REPO + FILE
 # ---------------------------------------------------------------------------
-step "0/10  Hugging Face model"
+step "0/7  Hugging Face model"
 HF_INPUT="${HF_URL:-${1:-}}"
 if [ -z "$HF_INPUT" ]; then
   echo "    Paste the HuggingFace URL (with ?show_file_info=… or /blob/main/…)"
-  echo "    Example: https://huggingface.co/DavidAU/Qwen3.6-40B-Claude-4.6-Opus-Deckard-Heretic-Uncensored-Thinking-NEO-CODE-Di-IMatrix-MAX-GGUF?show_file_info=Qwen3.6-40B-Deck-Opus-NEO-CODE-HERE-2T-OT-HIGH-Q8_0.gguf"
   printf "    HF URL: "
   read -r HF_INPUT
 fi
-if [ -z "$HF_INPUT" ]; then
-  echo "ERROR: no URL provided. Re-run with HF_URL=… or paste a URL when prompted."
-  exit 1
-fi
+[ -z "$HF_INPUT" ] && { echo "ERROR: no URL provided"; exit 1; }
 
-# Parser. Strip the protocol + host, then peel off either the ?show_file_info=
-# query, the /blob/<branch>/ segment, or the /resolve/<branch>/ segment to
-# recover REPO (owner/name) and FILE (path within the repo).
 PARSE="${HF_INPUT#https://}"
 PARSE="${PARSE#http://}"
 PARSE="${PARSE#huggingface.co/}"
@@ -104,39 +75,28 @@ case "$PARSE" in
   *\?show_file_info=*)
     MODEL_REPO="${PARSE%%\?*}"
     MODEL_FILE="${PARSE#*\?show_file_info=}"
-    # Strip any trailing query params after the filename (rare but possible)
     MODEL_FILE="${MODEL_FILE%%&*}"
     ;;
   */blob/*/*|*/resolve/*/*)
-    # Format: OWNER/REPO/blob/BRANCH/FILE  →  OWNER/REPO + FILE
     OWNER_REPO="${PARSE%%/blob/*}"
     OWNER_REPO="${OWNER_REPO%%/resolve/*}"
     MODEL_REPO="$OWNER_REPO"
     REST="${PARSE#"$OWNER_REPO/"}"
     REST="${REST#blob/}"
     REST="${REST#resolve/}"
-    # Strip the branch (first path segment of REST)
     MODEL_FILE="${REST#*/}"
     ;;
   *)
-    # No file specifier — repo-only URL. Will download the whole repo and
-    # prompt for which file to launch.
     MODEL_REPO="$PARSE"
     MODEL_FILE=""
     ;;
 esac
-
-# Trim any trailing slashes / fragments
 MODEL_REPO="${MODEL_REPO%/}"
 MODEL_REPO="${MODEL_REPO%%\#*}"
 MODEL_FILE="${MODEL_FILE%%\#*}"
 
-if [ -z "$MODEL_REPO" ] || [[ "$MODEL_REPO" != */* ]]; then
-  echo "ERROR: couldn't parse OWNER/REPO from '$HF_INPUT'"
-  exit 1
-fi
+[[ "$MODEL_REPO" == */* ]] || { echo "ERROR: couldn't parse OWNER/REPO from '$HF_INPUT'"; exit 1; }
 
-# Derive a directory slug from the repo name for $PERSIST/models/<slug>/
 SLUG=$(echo "$MODEL_REPO" | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9.-' | cut -c1-80)
 MODEL_DIR="$PERSIST/models/$SLUG"
 
@@ -145,395 +105,178 @@ echo "    file: ${MODEL_FILE:-<whole repo>}"
 echo "    dest: $MODEL_DIR"
 
 # ---------------------------------------------------------------------------
-# 1. Persistent directories — every place an installer might write
+# 1. Persistent dirs
 # ---------------------------------------------------------------------------
-step "1/10  Persistent directories on $PERSIST"
+step "1/7  Persistent directories on $PERSIST"
 mkdir -p \
-  "$PERSIST/.lmstudio" \
   "$PERSIST/.cache/huggingface" \
-  "$PERSIST/.cache/lm-studio" \
   "$PERSIST/.cache/pip" \
+  "$PERSIST/.lmstudio" \
+  "$PERSIST/.cache/lm-studio" \
   "$PERSIST/models" \
   "$PERSIST/venv-parent" \
-  "$PERSIST/bin"
-echo "    ok"
+  "$PERSIST/bin" \
+  "$PERSIST/llama.cpp-prebuilt"
 
-# ---------------------------------------------------------------------------
-# 2. Symlink home-directory locations to /workspace — so the LM Studio installer,
-#    huggingface_hub, and pip all write straight to persistent storage. We
-#    recreate these on every run because /root is ephemeral and a pod restart
-#    wipes the previous symlinks even though their targets survive.
-# ---------------------------------------------------------------------------
-step "2/10  Symlink ~/.lmstudio, ~/.cache/* → $PERSIST"
+# Symlink HF cache home → persistent storage so login + blobs survive restart.
+# Also symlinks both possible LM Studio install roots (~/.lmstudio for the
+# older layout, ~/.cache/lm-studio for the newer "llmster" rewrite) so the lms
+# installer writes straight to the persistent drive regardless of version.
 relink() {
   local target="$1" link="$2"
-  if [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ]; then
-    echo "    ok: $link → $target"
-    return
-  fi
-  # If a real directory sits at $link (first-ever run on a pod that wrote to
-  # ephemeral storage before this script touched it), MOVE its contents into
-  # $target so we don't lose anything, then replace with symlink.
+  [ -L "$link" ] && [ "$(readlink "$link")" = "$target" ] && return
   if [ -d "$link" ] && [ ! -L "$link" ]; then
-    echo "    migrating existing $link into $target"
     cp -an "$link"/. "$target"/ 2>/dev/null || true
     rm -rf "$link"
   fi
   rm -f "$link"
   ln -s "$target" "$link"
-  echo "    linked: $link → $target"
 }
-relink "$PERSIST/.lmstudio"          "$HOME/.lmstudio"
 relink "$PERSIST/.cache/huggingface" "$HOME/.cache/huggingface"
-relink "$PERSIST/.cache/lm-studio"   "$HOME/.cache/lm-studio"
 relink "$PERSIST/.cache/pip"         "$HOME/.cache/pip"
+relink "$PERSIST/.lmstudio"          "$HOME/.lmstudio"
+relink "$PERSIST/.cache/lm-studio"   "$HOME/.cache/lm-studio"
 
-# ---------------------------------------------------------------------------
-# 3. Write a persistent env-init file at $PERSIST/init.sh and source it from
-#    ~/.bashrc. After a pod restart you can also `source $PERSIST/init.sh`
-#    manually to get the same shell setup without re-running this script.
-# ---------------------------------------------------------------------------
-step "3/10  Persistent shell init"
+# Persistent shell init (PATH, HF_HOME, LD_LIBRARY_PATH for the prebuilt).
+# PATH covers both LM Studio install roots ($HOME/.lmstudio/bin for the older
+# layout, $HOME/.cache/lm-studio/bin for the newer "llmster" layout) plus our
+# prebuilt llama-server, all sourced from /workspace via the symlinks above.
 cat > "$PERSIST/init.sh" <<EOF
-# Auto-generated by installstart.sh — re-sourced on every shell start.
-# LM Studio's install layout changed in the "llmster" rewrite: the binary
-# moved from ~/.lmstudio/bin/lms to ~/.cache/lm-studio/bin/lms. Both paths are
-# on PATH so old and new layouts both work.
-export PATH="\$HOME/.lmstudio/bin:\$HOME/.cache/lm-studio/bin:$PERSIST/bin:\$PATH"
+export PATH="\$HOME/.lmstudio/bin:\$HOME/.cache/lm-studio/bin:$PERSIST/llama.cpp-prebuilt/bin:\$PATH"
+export LD_LIBRARY_PATH="$PERSIST/llama.cpp-prebuilt/lib:\${LD_LIBRARY_PATH:-}"
 export HF_HOME="$PERSIST/.cache/huggingface"
 export PIP_CACHE_DIR="$PERSIST/.cache/pip"
-# Activate the persistent Python venv if it exists
 if [ -f "$PERSIST/venv-parent/llama/bin/activate" ]; then
   source "$PERSIST/venv-parent/llama/bin/activate"
 fi
 EOF
-if ! grep -q "source $PERSIST/init.sh" "$HOME/.bashrc" 2>/dev/null; then
-  echo "source $PERSIST/init.sh" >> "$HOME/.bashrc"
-fi
-# Load it in THIS shell too
+grep -q "source $PERSIST/init.sh" "$HOME/.bashrc" 2>/dev/null || echo "source $PERSIST/init.sh" >> "$HOME/.bashrc"
 source "$PERSIST/init.sh"
-echo "    $PERSIST/init.sh written; sourced from ~/.bashrc"
 
 # ---------------------------------------------------------------------------
-# 4. Persistent Python venv for huggingface_hub and any future tooling.
-#    Lives on /workspace so pip install survives pod restart.
+# 2. LM Studio CLI — provides `lms login`, `lms link`, `lms ls`, and the
+#    model catalog UI. Skipped if already installed. Auto-detects which
+#    install layout (~/.lmstudio vs ~/.cache/lm-studio) actually got files.
 # ---------------------------------------------------------------------------
-step "4/10  Python venv at $PERSIST/venv-parent/llama"
-if [ ! -f "$PERSIST/venv-parent/llama/bin/activate" ]; then
-  python3 -m venv "$PERSIST/venv-parent/llama"
-  echo "    created"
-else
-  echo "    already exists"
-fi
-source "$PERSIST/venv-parent/llama/bin/activate"
-
-# ---------------------------------------------------------------------------
-# 5. Install LM Studio CLI. Both possible home directories (~/.lmstudio and
-#    ~/.cache/lm-studio) are now symlinked into /workspace, so whichever
-#    layout the installer uses, the bytes land on persistent storage.
-#
-#    LAYOUT CHANGE — Recent LM Studio releases renamed the package to "llmster"
-#    and moved the install root from ~/.lmstudio/ → ~/.cache/lm-studio/.
-#    Detect which layout actually got installed and fix PATH accordingly,
-#    instead of blindly assuming the old location.
-# ---------------------------------------------------------------------------
-step "5/10  LM Studio CLI"
+step "2/7  LM Studio CLI (lms)"
 if have lms; then
   echo "    already installed: $(lms version 2>/dev/null | head -1) (at $(command -v lms))"
 elif [ -x "$HOME/.lmstudio/bin/lms" ] || [ -x "$HOME/.cache/lm-studio/bin/lms" ]; then
-  echo "    binary already on disk but not yet on PATH"
+  echo "    binary present on disk; PATH refreshed from init.sh"
 else
+  echo "    fetching LM Studio installer"
   curl -fsSL https://lmstudio.ai/install.sh | bash
 fi
-# Force both candidate bin dirs onto PATH for THIS shell — covers either
-# install layout regardless of what init.sh saw at first source.
+# Force both candidate bin dirs onto PATH for THIS shell so the rest of the
+# script can use `lms` without waiting for a new login.
 export PATH="$HOME/.lmstudio/bin:$HOME/.cache/lm-studio/bin:$PATH"
 
-# Detect where lms actually landed so later steps can use the right paths
-# for runtimes and the models directory. LM_HOME is the install root (the
-# directory that contains bin/lms and extensions/backends/...).
-if [ -x "$HOME/.lmstudio/bin/lms" ]; then
-  LM_HOME="$HOME/.lmstudio"
-elif [ -x "$HOME/.cache/lm-studio/bin/lms" ]; then
-  LM_HOME="$HOME/.cache/lm-studio"
+if have lms; then
+  echo "    lms ready: $(command -v lms)"
+  echo
+  echo "    To pair this pod with your LM Studio cloud account, run AFTER this"
+  echo "    script finishes:"
+  echo "        lms login"
+  echo "    It will print a 3-word code; enter it at:"
+  echo "        https://lmstudio.ai/pairing"
 else
-  echo "ERROR: lms binary missing after install — checked ~/.lmstudio/bin/lms"
-  echo "       and ~/.cache/lm-studio/bin/lms. Inspect the installer output above."
-  exit 1
-fi
-echo "    LM_HOME: $LM_HOME"
-which lms || { echo "ERROR: 'lms' still not on PATH after fix-up"; exit 1; }
-
-# ---------------------------------------------------------------------------
-# 6. LM Studio runtimes (llama.cpp + CUDA backend). Skipped if already present
-#    under $LM_HOME/extensions/backends (persistent via the symlinks above).
-# ---------------------------------------------------------------------------
-step "6/10  LM Studio runtimes"
-if [ -d "$LM_HOME/extensions/backends" ] && \
-   find "$LM_HOME/extensions/backends" -name "llama-server" -type f 2>/dev/null | grep -q .; then
-  echo "    already bootstrapped (llama-server found under $LM_HOME)"
-else
-  lms bootstrap
+  echo "    WARNING: lms still not on PATH after install — check the installer output above"
 fi
 
 # ---------------------------------------------------------------------------
-# 7. huggingface_hub CLI inside the persistent venv. pip cache + token both
-#    live on /workspace via the symlinks set up above.
+# 3. Python venv + huggingface_hub
 # ---------------------------------------------------------------------------
-step "7/10  huggingface_hub"
-if pip show huggingface_hub >/dev/null 2>&1; then
-  echo "    already installed in venv: $(pip show huggingface_hub | grep -i ^version)"
-else
-  pip install -U huggingface_hub
+step "3/7  Python venv + huggingface_hub"
+if [ ! -f "$PERSIST/venv-parent/llama/bin/activate" ]; then
+  python3 -m venv "$PERSIST/venv-parent/llama"
 fi
-
-# Optional auth. Use $HF_TOKEN if exported; otherwise just note the login path.
-# The token lands at $HF_HOME/token which is on /workspace, so login persists.
-if [ -n "${HF_TOKEN:-}" ]; then
-  echo "    using HF_TOKEN from env"
-  hf auth login --token "$HF_TOKEN" 2>/dev/null || true
-elif [ -f "$HF_HOME/token" ]; then
-  echo "    already logged in (token at $HF_HOME/token)"
-else
-  echo "    not logged in. Public models still download (rate-limited)."
-  echo "    For higher limits or gated models: hf auth login"
-fi
+source "$PERSIST/venv-parent/llama/bin/activate"
+pip show huggingface_hub >/dev/null 2>&1 || pip install -q -U huggingface_hub
+echo "    hf: $(pip show huggingface_hub | grep -i ^version | awk '{print $2}')"
 
 # ---------------------------------------------------------------------------
-# 8. Model download. Goes to $PERSIST/models/<slug>/ via --local-dir. hf download
-#    is idempotent — re-runs are a no-op once the blob is cached. If the URL was
-#    repo-only, pull the whole repo and prompt for which file to launch.
+# 3. Download + extract the YaRN llama-server release. Skipped if already
+#    present on disk (cached on /workspace across pod restarts).
 # ---------------------------------------------------------------------------
-step "8/10  Model — ${MODEL_FILE:-<repo: $MODEL_REPO>}"
+step "4/7  llama-server release"
+PREBUILT_DIR="$PERSIST/llama.cpp-prebuilt"
+LLAMA_SERVER="$PREBUILT_DIR/bin/llama-server"
+if [ "${USE_LATEST:-0}" = "1" ]; then
+  echo "    USE_LATEST=1 — querying GitHub for latest"
+  LATEST=$(curl -fsSL https://api.github.com/repos/NextLVLHasH/AgentsRemoteBuild/releases/latest \
+    | grep -oE '"browser_download_url"\s*:\s*"[^"]+"' \
+    | sed -E 's/.*"(https[^"]+)".*/\1/' \
+    | grep -E 'lm-link-yarn-.*-linux-x64-cuda12\.tar\.gz$' \
+    | head -1)
+  [ -n "$LATEST" ] && RELEASE_URL="$LATEST"
+fi
+RELEASE_NAME=$(basename "$RELEASE_URL")
+EXTRACTED_DIR="${RELEASE_NAME%.tar.gz}"
+
+if [ -x "$LLAMA_SERVER" ] && [ -d "$PREBUILT_DIR/lib" ]; then
+  echo "    already extracted: $LLAMA_SERVER"
+else
+  echo "    pulling: $RELEASE_URL"
+  cd "$PREBUILT_DIR"
+  curl -fL --progress-bar -o release.tgz "$RELEASE_URL"
+  tar -xzf release.tgz
+  # Verify a llama-server is inside; symlink bin/ and lib/ at a stable path so
+  # PATH + LD_LIBRARY_PATH from init.sh resolve without knowing the version.
+  EXTRACTED=$(find . -maxdepth 2 -type d -name "lm-link-yarn-*linux-x64-cuda12*" | head -1)
+  [ -n "$EXTRACTED" ] || { echo "ERROR: no lm-link-yarn-* dir in tarball"; exit 1; }
+  ln -sfn "$PREBUILT_DIR/$(basename "$EXTRACTED")/bin" "$PREBUILT_DIR/bin"
+  ln -sfn "$PREBUILT_DIR/$(basename "$EXTRACTED")/lib" "$PREBUILT_DIR/lib"
+  chmod +x "$LLAMA_SERVER"
+  rm -f release.tgz
+  cd - >/dev/null
+  echo "    installed: $LLAMA_SERVER"
+fi
+
+# Force LD path for THIS shell (init.sh did it, but the symlink may have been
+# new since init.sh ran)
+export PATH="$PREBUILT_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$PREBUILT_DIR/lib:${LD_LIBRARY_PATH:-}"
+
+# Quick sanity check the binary actually runs with this CUDA driver
+if ! "$LLAMA_SERVER" --version >/dev/null 2>&1; then
+  echo "WARNING: llama-server failed --version — likely a CUDA driver mismatch."
+  echo "         Confirm nvidia-smi works on this pod and the driver supports CUDA 12."
+fi
+
+# ---------------------------------------------------------------------------
+# 4. Model download
+# ---------------------------------------------------------------------------
+step "5/7  Model — ${MODEL_FILE:-<repo: $MODEL_REPO>}"
 mkdir -p "$MODEL_DIR"
 if [ -n "$MODEL_FILE" ]; then
   EXPECTED_PATH="$MODEL_DIR/$MODEL_FILE"
   if [ -f "$EXPECTED_PATH" ] || [ -L "$EXPECTED_PATH" ]; then
-    echo "    already at $EXPECTED_PATH ($(du -h "$EXPECTED_PATH" 2>/dev/null | awk '{print $1}' || echo '?'))"
+    echo "    already at $EXPECTED_PATH ($(du -h "$EXPECTED_PATH" | awk '{print $1}'))"
   else
-    echo "    downloading — first run pulls the full GGUF (10s of GB)"
     hf download "$MODEL_REPO" "$MODEL_FILE" --local-dir "$MODEL_DIR"
   fi
 else
-  echo "    URL didn't specify a file — pulling the whole repo (can be large)"
   hf download "$MODEL_REPO" --local-dir "$MODEL_DIR"
-  # Pick which GGUF to launch. If exactly one is present, use it; otherwise list
-  # them and prompt.
   mapfile -t GGUFS < <(find "$MODEL_DIR" -maxdepth 4 -name "*.gguf" -not -name "mmproj*" | sort)
-  if [ "${#GGUFS[@]}" -eq 0 ]; then
-    echo "ERROR: no .gguf files found under $MODEL_DIR"
-    exit 1
-  elif [ "${#GGUFS[@]}" -eq 1 ]; then
+  [ "${#GGUFS[@]}" -gt 0 ] || { echo "ERROR: no .gguf in $MODEL_DIR"; exit 1; }
+  if [ "${#GGUFS[@]}" -eq 1 ]; then
     EXPECTED_PATH="${GGUFS[0]}"
-    MODEL_FILE="$(basename "$EXPECTED_PATH")"
-    echo "    only GGUF in repo: $MODEL_FILE"
   else
-    echo "    multiple GGUFs found — pick one:"
-    i=0
-    for g in "${GGUFS[@]}"; do
-      i=$((i+1))
-      sz=$(du -h "$g" 2>/dev/null | awk '{print $1}')
-      echo "      $i) $(basename "$g")  [$sz]"
-    done
-    printf "    Number: "
-    read -r CHOICE
+    echo "    multiple GGUFs — pick one:"
+    i=0; for g in "${GGUFS[@]}"; do i=$((i+1)); echo "      $i) $(basename "$g")"; done
+    printf "    Number: "; read -r CHOICE
     EXPECTED_PATH="${GGUFS[$((CHOICE-1))]}"
-    MODEL_FILE="$(basename "$EXPECTED_PATH")"
   fi
+  MODEL_FILE="$(basename "$EXPECTED_PATH")"
 fi
-
-# Resolve symlinks so we hand llama-server a real path (the HF cache layout
-# uses snapshot/<hash> → blobs/<hash> symlinks; llama-server is fine following
-# them but logging the resolved path is helpful for debugging).
 REAL_MODEL=$(readlink -f "$EXPECTED_PATH")
-echo "    resolved: $REAL_MODEL"
-ls -lh "$REAL_MODEL" | awk '{print "    size:    "$5}'
-
-# Register the model with LM Studio's catalog so `lms ls` and `lms load` see it.
-# We deliberately skip `lms import` here — that command creates a symlink with
-# a wrong relative target (../../blobs/<hash>) which dangles unless you
-# repair it manually. Instead, drop a direct absolute symlink to the real GGUF
-# straight into $LM_HOME/models/<creator>/<name>/<file>.gguf, which is the
-# layout LM Studio's scanner expects. Restart the daemon so it picks up the
-# new entry before we exec llama-server.
-LMS_CREATOR="${MODEL_REPO%/*}"
-LMS_NAME="${MODEL_REPO#*/}"
-LMS_MODEL_DIR="$LM_HOME/models/$LMS_CREATOR/$LMS_NAME"
-LMS_MODEL_LINK="$LMS_MODEL_DIR/$(basename "$MODEL_FILE")"
-mkdir -p "$LMS_MODEL_DIR"
-# Replace any prior link (broken or otherwise) with a fresh absolute one
-rm -f "$LMS_MODEL_LINK"
-ln -s "$REAL_MODEL" "$LMS_MODEL_LINK"
-echo "    registered with LM Studio: $LMS_CREATOR/$LMS_NAME"
-echo "    lms link: $LMS_MODEL_LINK -> $REAL_MODEL"
-
-# Restart the daemon if it's already running so it rescans. Failures here are
-# non-fatal — the model is already on disk for llama-server either way.
-if have lms; then
-  lms server stop >/dev/null 2>&1 || true
-  lms server start >/dev/null 2>&1 || true
-  echo "    lms server restarted; verify with: lms ls"
-fi
+echo "    resolved: $REAL_MODEL ($(ls -lh "$REAL_MODEL" | awk '{print $5}'))"
 
 # ---------------------------------------------------------------------------
-# 9. Locate or build llama-server.
-#
-#    Recent LM Studio releases ("llmster" >= 2.13) ship llama.cpp only as
-#    shared libraries (libllama.so / libggml_llamacpp.so) — they embed the
-#    inference engine in the lms daemon via dlopen and no longer drop a
-#    standalone `llama-server` binary on disk. That means the YaRN / KV-cache
-#    quant flags can't be passed through the lms CLI, so to actually run at
-#    1M context we have to build llama-server ourselves from source. Cached
-#    on $PERSIST so the build is one-time across pod restarts.
+# 5. Free port + kill stale launchers
 # ---------------------------------------------------------------------------
-step "9/10  Locate or build llama-server"
-
-CUSTOM_BUILD="$PERSIST/llama.cpp/build/bin/llama-server"
-
-# 9.a — Look first in LM Studio's bundled runtime (old layout). On 2.13+ this
-#       will return nothing because LM Studio ships only the .so libs now.
-LLAMA_SERVER=$(find "$LM_HOME" "$HOME/.lmstudio" "$HOME/.cache/lm-studio" -name "llama-server" -executable -type f 2>/dev/null | head -1)
-
-# 9.b — Then look for a previously-built copy on $PERSIST. After the first
-#       successful build below, every subsequent pod start finds it here in
-#       milliseconds and skips the whole build step.
-if [ -z "$LLAMA_SERVER" ] && [ -x "$CUSTOM_BUILD" ]; then
-  LLAMA_SERVER="$CUSTOM_BUILD"
-  echo "    found previously-built binary: $LLAMA_SERVER"
-fi
-
-# 9.c — Nothing on disk → build it. We need llama-server with CUDA support so
-#       the model actually runs on the GPU. Build dependencies are installed
-#       only if missing; clone is shallow; build target is just llama-server.
-if [ -z "$LLAMA_SERVER" ]; then
-  echo "    llama-server not bundled by LM Studio 2.13+ — building from source"
-  echo "    one-time cost ≈ 3-5 min on a CUDA-capable pod; cached on $PERSIST"
-  echo
-
-  # Install build deps if any are missing. apt-get update only fires when
-  # something's actually missing so we don't pay for it on re-runs.
-  MISSING_DEPS=""
-  for pkg in git cmake build-essential; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || MISSING_DEPS="$MISSING_DEPS $pkg"
-  done
-  if [ -n "$MISSING_DEPS" ]; then
-    echo "    installing build deps:$MISSING_DEPS"
-    apt-get update -qq && apt-get install -y $MISSING_DEPS
-  fi
-
-  # Clone (or update) llama.cpp on /workspace. Shallow clone keeps it small.
-  if [ ! -d "$PERSIST/llama.cpp/.git" ]; then
-    git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$PERSIST/llama.cpp"
-  else
-    echo "    llama.cpp clone exists; pulling latest"
-    (cd "$PERSIST/llama.cpp" && git pull --rebase --autostash 2>/dev/null || true)
-  fi
-
-  # Configure + build. -DGGML_CUDA=ON requires nvcc; if the pod doesn't have
-  # the full CUDA toolkit installed, fall back to a CPU-only build (much
-  # slower but at least functional).
-  #
-  # BUILD_SHARED_LIBS=ON produces .so files alongside the binary. We need
-  # these only when OVERLAY_LMS_LIBS=1 (next step) wants to swap LM Studio's
-  # bundled libs for our YaRN-capable build; default builds remain statically
-  # linked into llama-server so they don't need .so resolution at runtime.
-  CMAKE_ARGS=()
-  if have nvcc; then
-    echo "    configuring CUDA build (nvcc found)"
-    CMAKE_ARGS+=(-DGGML_CUDA=ON)
-  else
-    echo "    WARNING: nvcc not found — building CPU-only llama-server."
-    echo "             Inference will fall back to CPU which is very slow."
-  fi
-  if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
-    echo "    OVERLAY_LMS_LIBS=1 — building shared libs too so we can overlay"
-    CMAKE_ARGS+=(-DBUILD_SHARED_LIBS=ON)
-  fi
-  cd "$PERSIST/llama.cpp"
-  cmake -B build "${CMAKE_ARGS[@]}" >/dev/null
-  echo "    compiling llama-server (-j $(nproc))"
-  # When overlaying, build the full project so we get every .so. Otherwise just
-  # the llama-server target — shaves a couple minutes off the cold build.
-  if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
-    cmake --build build --config Release -j "$(nproc)"
-  else
-    cmake --build build --config Release --target llama-server -j "$(nproc)"
-  fi
-  cd - >/dev/null
-
-  if [ ! -x "$CUSTOM_BUILD" ]; then
-    echo "ERROR: build finished but llama-server isn't at $CUSTOM_BUILD"
-    exit 1
-  fi
-  LLAMA_SERVER="$CUSTOM_BUILD"
-fi
-
-echo "    using: $LLAMA_SERVER"
-
-# ---------------------------------------------------------------------------
-# 9.5  (optional) Overlay LM Studio's bundled llama.cpp .so files with our
-#      YaRN-capable build. Off by default — set OVERLAY_LMS_LIBS=1 to enable.
-#
-#      LM Studio 2.13+ uses non-standard library names (libggml_llamacpp.so
-#      instead of llama.cpp's split libggml.so / libggml-base.so / libggml-cuda.so),
-#      so the ABI may not match and `lms load` could break. Originals are
-#      backed up as <name>.lmstudio-bak; restore with the printed one-liner.
-# ---------------------------------------------------------------------------
-if [ "${OVERLAY_LMS_LIBS:-0}" = "1" ]; then
-  step "9.5/10 Overlay LM Studio libs with YaRN-capable build"
-  BUILD_LIB_DIR="$PERSIST/llama.cpp/build/bin"
-  # CUDA build is the one we actually use; CPU/Vulkan stay untouched. If you
-  # need to overlay those too, copy this block and swap the backend pattern.
-  CUDA_BACKEND=$(find "$LM_HOME/extensions/backends" -maxdepth 1 -type d -name "llama.cpp-linux-*nvidia-cuda*" 2>/dev/null | head -1)
-  if [ -z "$CUDA_BACKEND" ]; then
-    echo "    no LM Studio CUDA backend found; skipping overlay"
-  else
-    echo "    target: $CUDA_BACKEND"
-    overlay_one() {
-      local src_basename="$1" dst_basename="$2"
-      local src="$BUILD_LIB_DIR/$src_basename"
-      local dst="$CUDA_BACKEND/$dst_basename"
-      if [ ! -f "$src" ]; then
-        echo "    skip ${dst_basename}: build didn't produce $src"
-        return
-      fi
-      # Back up original once. If a backup already exists from a prior run
-      # we don't overwrite it — that preserves the ORIGINAL LM Studio lib
-      # across multiple overlay attempts.
-      if [ -f "$dst" ] && [ ! -f "${dst}.lmstudio-bak" ]; then
-        cp -p "$dst" "${dst}.lmstudio-bak"
-      fi
-      cp -f "$src" "$dst"
-      echo "    overlay: $(basename "$dst") (backup at ${dst}.lmstudio-bak)"
-    }
-    # llama.cpp's modern split-library layout exports libggml.so + libggml-base.so
-    # + libggml-cuda.so + libllama.so. LM Studio merges these into a single
-    # libggml_llamacpp.so. We can't perfectly map the split → merged form, so
-    # we overlay each candidate and let the loader sort it out; if linking
-    # symbols fails, the restore command at the end gets you back to working.
-    overlay_one libllama.so libllama.so
-    overlay_one libggml.so libggml_llamacpp.so
-    # If neither libggml.so was produced (very old llama.cpp), try libggml-base
-    if [ ! -f "$BUILD_LIB_DIR/libggml.so" ] && [ -f "$BUILD_LIB_DIR/libggml-base.so" ]; then
-      overlay_one libggml-base.so libggml_llamacpp.so
-    fi
-    echo
-    echo "    LM Studio libs overlaid with our YaRN build."
-    echo "    To restore originals if 'lms load' breaks, run:"
-    echo "        for f in \"$CUDA_BACKEND\"/*.lmstudio-bak; do mv -f \"\$f\" \"\${f%.lmstudio-bak}\"; done"
-    echo
-  fi
-fi
-
-# ---------------------------------------------------------------------------
-# 10. Free the port and exec llama-server with YaRN + Q8 KV + 1M context
-# ---------------------------------------------------------------------------
-step "10/10 Launch llama-server on :$PORT"
-# Stop LM Studio's own daemon if it's holding the port, then kill any leftover
-# llama-server from a previous run.
-if have lms; then
-  lms server stop 2>/dev/null || true
-fi
+step "6/7  Free port $PORT"
+have lms && lms server stop 2>/dev/null || true
 EXISTING=$(lsof -ti tcp:"$PORT" 2>/dev/null || true)
 if [ -n "$EXISTING" ]; then
   echo "    killing PIDs on :$PORT — $EXISTING"
@@ -543,61 +286,39 @@ if [ -n "$EXISTING" ]; then
   [ -n "$EXISTING" ] && kill -KILL $EXISTING 2>/dev/null || true
 fi
 
-echo
-echo "    model:       $REAL_MODEL"
-echo "    port:        $PORT"
-echo "    context:     $TARGET_CONTEXT tokens (YaRN factor=$ROPE_SCALE on $YARN_ORIG_CTX-trained base)"
-echo "    KV cache:    $KV_CACHE_TYPE (k and v)"
-echo "    GPU offload: all layers"
-echo
-echo "    OpenAI-compatible endpoint: http://0.0.0.0:$PORT/v1"
-echo "    Wait for 'all slots are idle' before pointing HasH AI at it."
-echo
-
-# `--rope-freq-scale` is the inverse of `--rope-scale` (1/N). Some llama.cpp
-# builds want one, some want the other; setting both is unambiguous and
-# harmless. `--verbose` makes llama-server log the resolved `n_ctx` separately
-# from the model's `n_ctx_train` so you can confirm 1M actually applied — look
-# for "n_ctx = 1010000" vs "n_ctx_train = 262144" in the startup output.
-#
-# If llama.cpp's loader still clamps to n_ctx_train (can happen with very new
-# architectures whose YaRN config isn't yet recognized), we run a second attempt
-# at the model's native context as a fallback so the endpoint still comes up.
-ROPE_FREQ_SCALE=$(awk -v n="$ROPE_SCALE" 'BEGIN{ printf "%.6f", 1.0 / n }')
-
-LAUNCH_ARGS=(
-  --model "$REAL_MODEL"
-  --host 0.0.0.0
-  --port "$PORT"
-  --n-gpu-layers 999
-  --ctx-size "$TARGET_CONTEXT"
-  --rope-scaling yarn
-  --rope-scale "$ROPE_SCALE"
-  --rope-freq-scale "$ROPE_FREQ_SCALE"
-  --rope-freq-base "$ROPE_FREQ_BASE"
-  --yarn-orig-ctx "$YARN_ORIG_CTX"
-  --cache-type-k "$KV_CACHE_TYPE"
-  --cache-type-v "$KV_CACHE_TYPE"
-  --metrics
-  --no-warmup
-  --verbose
-)
-
-echo "    attempting $TARGET_CONTEXT context via YaRN (factor=$ROPE_SCALE, freq-scale=$ROPE_FREQ_SCALE)"
-echo "    if llama.cpp clamps and exits, we'll retry at native $YARN_ORIG_CTX as fallback"
+# ---------------------------------------------------------------------------
+# 6. Launch llama-server with YaRN + Q8 KV. If the YaRN attempt errors out,
+#    retry at native context as fallback.
+# ---------------------------------------------------------------------------
+step "7/7  Launch llama-server on :$PORT"
+echo "    model:    $REAL_MODEL"
+echo "    context:  $TARGET_CONTEXT tokens (YaRN factor=$ROPE_SCALE from $YARN_ORIG_CTX-trained)"
+echo "    KV cache: $KV_CACHE_TYPE"
+echo "    endpoint: http://0.0.0.0:$PORT/v1"
 echo
 
-# First attempt: extended context via YaRN.
-if "$LLAMA_SERVER" "${LAUNCH_ARGS[@]}"; then
+ROPE_FREQ_SCALE=$(awk -v n="$ROPE_SCALE" 'BEGIN{printf "%.6f", 1.0/n}')
+
+if "$LLAMA_SERVER" \
+    --model "$REAL_MODEL" \
+    --host 0.0.0.0 \
+    --port "$PORT" \
+    --n-gpu-layers 999 \
+    --ctx-size "$TARGET_CONTEXT" \
+    --rope-scaling yarn \
+    --rope-scale "$ROPE_SCALE" \
+    --rope-freq-scale "$ROPE_FREQ_SCALE" \
+    --rope-freq-base "$ROPE_FREQ_BASE" \
+    --yarn-orig-ctx "$YARN_ORIG_CTX" \
+    --cache-type-k "$KV_CACHE_TYPE" \
+    --cache-type-v "$KV_CACHE_TYPE" \
+    --metrics --no-warmup --verbose; then
   exit 0
 fi
 
-# YaRN attempt failed (non-zero exit) — fall back to the model's native context.
-# This swaps --ctx-size to YARN_ORIG_CTX, drops YaRN flags, and re-launches.
 echo
-echo "==> Fallback: YaRN attempt exited non-zero. Retrying at native $YARN_ORIG_CTX context."
+echo "==> YaRN attempt exited non-zero. Retrying at native $YARN_ORIG_CTX context."
 echo
-
 exec "$LLAMA_SERVER" \
   --model "$REAL_MODEL" \
   --host 0.0.0.0 \
@@ -606,5 +327,4 @@ exec "$LLAMA_SERVER" \
   --ctx-size "$YARN_ORIG_CTX" \
   --cache-type-k "$KV_CACHE_TYPE" \
   --cache-type-v "$KV_CACHE_TYPE" \
-  --metrics \
-  --no-warmup
+  --metrics --no-warmup
